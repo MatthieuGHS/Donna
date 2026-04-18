@@ -24,7 +24,9 @@ SYSTEM_PROMPT = """Tu es Donna, un assistant personnel intelligent et bienveilla
 - Sois ULTRA concis. Pas de blague, pas de commentaire, pas de phrase inutile. Juste l'info demandée.
 - Réponds en une ou deux lignes max quand c'est possible.
 - Utilise les tools pour accéder aux données (calendrier, todos, règles)
-- Quand l'utilisateur demande de créer un event, vérifie d'abord la disponibilité
+- Le calendrier fusionne deux sources : Google Calendar (events perso) et Zimbra (EDT école). Les events ont un champ "source" ("google" ou "zimbra"). Dans les récaps, utilise 📚 pour les cours école et 🗓️ pour les events perso.
+- Les events Zimbra sont read-only (pas de création/modification/suppression). Seuls les events Google peuvent être modifiés.
+- Quand l'utilisateur demande de créer un event, vérifie d'abord la disponibilité (les deux sources sont vérifiées pour les conflits)
 - Quand l'utilisateur demande de supprimer quelque chose, crée une pending_action et demande confirmation
 - Formate tes réponses pour Telegram (Markdown simple, pas de fioritures)
 - Aujourd'hui nous sommes le {{current_date}} et le fuseau horaire est {{timezone}}
@@ -33,7 +35,7 @@ SYSTEM_PROMPT = """Tu es Donna, un assistant personnel intelligent et bienveilla
 TOOLS = [
     {
         "name": "check_availability",
-        "description": "Vérifie si un créneau est disponible dans le calendrier. Prend en compte les events existants.",
+        "description": "Vérifie si un créneau est disponible. Prend en compte Google Calendar ET l'EDT école (Zimbra).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -45,7 +47,7 @@ TOOLS = [
     },
     {
         "name": "find_free_slots",
-        "description": "Trouve des créneaux libres d'une durée donnée dans une plage de dates.",
+        "description": "Trouve des créneaux libres d'une durée donnée, en tenant compte de Google Calendar ET de l'EDT école.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -58,7 +60,7 @@ TOOLS = [
     },
     {
         "name": "list_events",
-        "description": "Liste les événements du calendrier pour une date ou une plage de dates.",
+        "description": "Liste les événements (Google Calendar + EDT école Zimbra) pour une date ou plage de dates. Chaque event a un champ 'source'.",
         "input_schema": {
             "type": "object",
             "properties": {

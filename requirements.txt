@@ -31,5 +31,8 @@ structlog==25.3.0
 # HTTP client (bot -> API)
 httpx==0.28.1
 
+# ICS parsing
+icalendar==6.1.3
+
 # Timezone
 pytz==2025.2

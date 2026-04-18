@@ -1,13 +1,15 @@
-"""Calendar API routes."""
+"""Calendar API routes — merges Google Calendar + Zimbra (school EDT)."""
 
-from datetime import timedelta
+from datetime import datetime
 
+import pytz
 import structlog
 from fastapi import APIRouter, Depends, Request
 
 from api.auth import verify_api_key
 from api.rate_limit import limiter
-from api.services import calendar_service
+from api.services import calendar_service, zimbra_service
+from config import settings
 from db.models import (
     APIResponse,
     CheckAvailabilityRequest,
@@ -22,6 +24,21 @@ router = APIRouter()
 logger = structlog.get_logger(__name__)
 
 
+def _add_source_to_google_events(events: list[dict]) -> list[dict]:
+    """Tag Google Calendar events with source field."""
+    for e in events:
+        if "source" not in e:
+            e["source"] = "google"
+    return events
+
+
+def _merge_and_sort(google_events: list[dict], zimbra_events: list[dict]) -> list[dict]:
+    """Merge events from both sources and sort by start time."""
+    all_events = _add_source_to_google_events(google_events) + zimbra_events
+    all_events.sort(key=lambda e: e.get("start", ""))
+    return all_events
+
+
 @router.post("/check_availability", response_model=APIResponse)
 @limiter.limit("100/minute")
 async def check_availability(
@@ -32,6 +49,24 @@ async def check_availability(
     logger.info("check_availability", start=str(body.start), end=str(body.end))
     try:
         result = calendar_service.check_availability(body.start, body.end)
+
+        # Also check Zimbra conflicts
+        zimbra_warn = None
+        if zimbra_service.is_configured():
+            try:
+                zimbra_conflicts = zimbra_service.check_availability(body.start, body.end)
+                if zimbra_conflicts:
+                    result["available"] = False
+                    result["conflicts"] = result.get("conflicts", []) + [
+                        {"start": c["start"], "end": c["end"], "title": c["title"], "source": "zimbra"}
+                        for c in zimbra_conflicts
+                    ]
+            except Exception:
+                zimbra_warn = "EDT école indisponible"
+
+        if zimbra_warn:
+            result["zimbra_warning"] = zimbra_warn
+
         return APIResponse(success=True, data=result)
     except Exception as e:
         logger.error("check_availability_error", error=str(e))
@@ -50,6 +85,22 @@ async def find_free_slots(
         slots = calendar_service.find_free_slots(
             body.duration_minutes, body.date_range_start, body.date_range_end
         )
+
+        # Filter out slots that conflict with Zimbra events
+        if zimbra_service.is_configured():
+            try:
+                tz = pytz.timezone(settings.timezone)
+                filtered_slots = []
+                for slot in slots:
+                    slot_start = datetime.fromisoformat(slot["start"])
+                    slot_end = datetime.fromisoformat(slot["end"])
+                    zimbra_conflicts = zimbra_service.check_availability(slot_start, slot_end)
+                    if not zimbra_conflicts:
+                        filtered_slots.append(slot)
+                slots = filtered_slots
+            except Exception:
+                logger.warning("zimbra_unavailable_for_free_slots")
+
         return APIResponse(success=True, data={"slots": slots})
     except Exception as e:
         logger.error("find_free_slots_error", error=str(e))
@@ -66,16 +117,43 @@ async def list_events(
     logger.info("list_events", date=str(body.target_date))
     try:
         if body.target_date:
-            events = calendar_service.list_events(body.target_date, body.target_date)
+            google_events = calendar_service.list_events(body.target_date, body.target_date)
+            zimbra_events = []
+            zimbra_warn = None
+            if zimbra_service.is_configured():
+                try:
+                    zimbra_events = zimbra_service.list_events(body.target_date, body.target_date)
+                except Exception:
+                    zimbra_warn = "EDT école indisponible"
+            events = _merge_and_sort(google_events, zimbra_events)
+            data = {"events": events}
+            if zimbra_warn:
+                data["zimbra_warning"] = zimbra_warn
+            return APIResponse(success=True, data=data)
+
         elif body.date_range_start and body.date_range_end:
-            events = calendar_service.list_events(body.date_range_start, body.date_range_end)
+            google_events = calendar_service.list_events(body.date_range_start, body.date_range_end)
+            zimbra_events = []
+            zimbra_warn = None
+            if zimbra_service.is_configured():
+                try:
+                    zimbra_events = zimbra_service.list_events(body.date_range_start, body.date_range_end)
+                except Exception:
+                    zimbra_warn = "EDT école indisponible"
+            events = _merge_and_sort(google_events, zimbra_events)
+            data = {"events": events}
+            if zimbra_warn:
+                data["zimbra_warning"] = zimbra_warn
+            return APIResponse(success=True, data=data)
+
         else:
             return APIResponse(success=False, error="Provide date or date_range_start+date_range_end")
-        return APIResponse(success=True, data={"events": events})
     except Exception as e:
         logger.error("list_events_error", error=str(e))
         return APIResponse(success=False, error="Failed to list events")
 
+
+# create, update, delete stay Google-only
 
 @router.post("/create_event", response_model=APIResponse)
 @limiter.limit("100/minute")
@@ -86,15 +164,29 @@ async def create_event(
 ) -> APIResponse:
     logger.info("create_event", title=body.title)
     try:
-        # Check for conflicts unless force=true
         if not body.force:
+            # Check Google conflicts
             availability = calendar_service.check_availability(body.start, body.end)
-            if not availability["available"]:
+            conflicts = availability.get("conflicts", [])
+
+            # Check Zimbra conflicts too
+            if zimbra_service.is_configured():
+                try:
+                    zimbra_conflicts = zimbra_service.check_availability(body.start, body.end)
+                    conflicts += [
+                        {"start": c["start"], "end": c["end"], "title": c["title"], "source": "zimbra"}
+                        for c in zimbra_conflicts
+                    ]
+                except Exception:
+                    pass
+
+            if conflicts:
                 return APIResponse(
                     success=False,
                     error="Time slot has conflicts. Use force=true to override.",
-                    data={"conflicts": availability["conflicts"]},
+                    data={"conflicts": conflicts},
                 )
+
         result = calendar_service.create_event(body.title, body.start, body.end, body.description)
         return APIResponse(success=True, data=result)
     except Exception as e:

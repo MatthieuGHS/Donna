@@ -187,7 +187,10 @@ async def create_event(
                     data={"conflicts": conflicts},
                 )
 
-        result = calendar_service.create_event(body.title, body.start, body.end, body.description)
+        result = calendar_service.create_event(
+            body.title, body.start, body.end, body.description,
+            attendees=body.attendees, with_meet=body.with_meet,
+        )
         return APIResponse(success=True, data=result)
     except Exception as e:
         logger.error("create_event_error", error=str(e))

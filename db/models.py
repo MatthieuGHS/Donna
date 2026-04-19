@@ -104,6 +104,8 @@ class CreateEventRequest(BaseModel):
     end: datetime
     description: str | None = None
     force: bool = False
+    attendees: list[str] | None = None
+    with_meet: bool = False
 
 
 class UpdateEventRequest(BaseModel):

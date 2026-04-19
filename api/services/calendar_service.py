@@ -121,8 +121,17 @@ def find_free_slots(duration_minutes: int, date_start: date, date_end: date) -> 
     return slots
 
 
-def create_event(title: str, start: datetime, end: datetime, description: str | None = None) -> dict:
-    """Create a new calendar event."""
+def create_event(
+    title: str,
+    start: datetime,
+    end: datetime,
+    description: str | None = None,
+    attendees: list[str] | None = None,
+    with_meet: bool = False,
+) -> dict:
+    """Create a new calendar event, optionally with Google Meet and attendees."""
+    import uuid
+
     service = _get_calendar_service()
 
     event_body = {
@@ -132,10 +141,42 @@ def create_event(title: str, start: datetime, end: datetime, description: str | 
     }
     if description:
         event_body["description"] = description
+    if attendees:
+        event_body["attendees"] = [{"email": email} for email in attendees]
+    if with_meet:
+        event_body["conferenceData"] = {
+            "createRequest": {
+                "requestId": str(uuid.uuid4()),
+                "conferenceSolutionKey": {"type": "hangoutsMeet"},
+            }
+        }
 
-    event = service.events().insert(calendarId=settings.google_calendar_id, body=event_body).execute()
-    logger.info("calendar_create_event", event_id=event["id"], title=title)
-    return {"event_id": event["id"], "title": title, "start": start.isoformat(), "end": end.isoformat()}
+    conference_version = 1 if with_meet else 0
+    event = service.events().insert(
+        calendarId=settings.google_calendar_id,
+        body=event_body,
+        conferenceDataVersion=conference_version,
+        sendUpdates="all" if attendees else "none",
+    ).execute()
+
+    result = {
+        "event_id": event["id"],
+        "title": title,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+    }
+
+    if attendees:
+        result["attendees"] = attendees
+    if with_meet and "conferenceData" in event:
+        entry_points = event["conferenceData"].get("entryPoints", [])
+        for ep in entry_points:
+            if ep.get("entryPointType") == "video":
+                result["meet_link"] = ep["uri"]
+                break
+
+    logger.info("calendar_create_event", event_id=event["id"], title=title, with_meet=with_meet)
+    return result
 
 
 def update_event(event_id: str, fields: dict) -> dict:

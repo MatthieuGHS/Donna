@@ -72,7 +72,7 @@ TOOLS = [
     },
     {
         "name": "create_event",
-        "description": "Crée un événement dans le calendrier. Refuse si conflit sauf si force=true.",
+        "description": "Crée un événement dans le calendrier Google. Refuse si conflit sauf si force=true. Peut ajouter des invités et créer un lien Google Meet.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -81,6 +81,8 @@ TOOLS = [
                 "end": {"type": "string", "description": "Fin (ISO 8601)"},
                 "description": {"type": "string", "description": "Description optionnelle"},
                 "force": {"type": "boolean", "description": "Forcer même si conflit", "default": False},
+                "attendees": {"type": "array", "items": {"type": "string"}, "description": "Liste d'emails des invités"},
+                "with_meet": {"type": "boolean", "description": "Créer un lien Google Meet", "default": False},
             },
             "required": ["title", "start", "end"],
         },

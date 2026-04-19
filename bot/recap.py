@@ -27,16 +27,14 @@ async def send_recap(bot, recap_type: str) -> None:
         prompt = (
             f"Fais-moi un récap complet de ma journée du {target_date}. "
             "Liste mes événements du calendrier, mes todos en cours (surtout celles qui ont une deadline aujourd'hui), "
-            "et rappelle-moi mes règles actives si pertinent. "
-            "Formate joliment pour Telegram."
+            "Formate simplement et compacte pour Telegram."
         )
     else:
         tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
         prompt = (
             f"Fais-moi une preview de ma journée de demain ({tomorrow}). "
             "Liste mes événements prévus, mes todos avec deadline demain, "
-            "et rappelle-moi s'il y a des règles pertinentes. "
-            "Formate joliment pour Telegram."
+            "Formate simplement et compacte pour Telegram."
         )
 
     try:

@@ -164,31 +164,79 @@ async def _execute_pending_action(payload: dict) -> str | None:
     - {"action": "delete_event", "event_id": "..."}
     - {"function": "delete_event", "params": {"event_id": "..."}}
     """
-    # Normalize: support both "action" and "function" keys
+    # Normalize: support both "action" and "function" keys, and flat/nested params
     action = payload.get("action") or payload.get("function")
-    params = payload.get("params", {})
+    params = payload.get("params") or {}
+
+    def get(key):
+        value = payload.get(key)
+        return value if value is not None else params.get(key)
 
     try:
         if action == "delete_event":
-            event_id = payload.get("event_id") or params.get("event_id")
+            event_id = get("event_id")
             if event_id:
                 await api_client.call("/calendar/delete_event", {"event_id": event_id})
                 return "Événement supprimé."
 
         elif action == "delete_todo":
-            todo_id = payload.get("todo_id") or params.get("todo_id")
+            todo_id = get("todo_id")
             if todo_id:
                 await api_client.call("/todos/delete", {"todo_id": todo_id})
-                return "Todo supprimée."
+                return await _todo_message("Todo supprimée.")
 
         elif action == "delete_rule":
-            rule_id = payload.get("rule_id") or params.get("rule_id")
+            rule_id = get("rule_id")
             if rule_id:
                 await api_client.call("/rules/delete", {"rule_id": rule_id})
                 return "Règle supprimée."
+
+        elif action == "create_event":
+            event_body = {
+                "title": get("title"),
+                "start": get("start"),
+                "end": get("end"),
+                "description": get("description"),
+                "attendees": get("attendees"),
+                "force": True,
+            }
+            event_body = {k: v for k, v in event_body.items() if v is not None}
+            result = await api_client.call("/calendar/create_event", event_body)
+            if result.get("success"):
+                return "Événement créé."
+            return f"Impossible de créer l'événement : {result.get('error', 'erreur inconnue')}"
 
     except Exception as e:
         logger.error("execute_pending_failed", action=action, error=str(e))
         return f"Erreur lors de l'exécution : action {action}"
 
     return None
+
+
+async def _todo_message(prefix: str) -> str:
+    """Return prefix followed by the current pending todos list."""
+    todos_block = await _format_pending_todos()
+    if todos_block:
+        return f"{prefix}\n\n{todos_block}"
+    return prefix
+
+
+async def _format_pending_todos() -> str | None:
+    """Fetch pending todos and format them as a plain bullet list."""
+    try:
+        result = await api_client.call("/todos/list", {"filter": "pending"})
+        if not result.get("success"):
+            return None
+        todos = result.get("data", {}).get("todos", [])
+        if not todos:
+            return "Aucune todo en cours."
+        lines = ["Todos en cours :"]
+        for t in todos:
+            title = t.get("title", "")
+            deadline = t.get("deadline")
+            suffix = f" — {deadline}" if deadline else ""
+            lines.append(f"• {title}{suffix}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("format_todos_failed", error=str(e))
+        return None

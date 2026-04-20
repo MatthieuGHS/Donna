@@ -47,3 +47,9 @@ htmlcov/
 *.ogg
 *.mp3
 *.wav
+
+# ICS files (may contain personal data)
+*.ics
+
+# Claude Code project context (contains personal info)
+CLAUDE.md

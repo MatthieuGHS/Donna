@@ -127,6 +127,11 @@ class CreateTodoRequest(BaseModel):
     priority: Priority = Priority.MEDIUM
 
 
+class UpdateTodoRequest(BaseModel):
+    todo_id: UUID
+    title: str = Field(min_length=1, max_length=500)
+
+
 class CompleteTodoRequest(BaseModel):
     todo_id: UUID
 

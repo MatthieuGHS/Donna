@@ -12,6 +12,7 @@ from db.models import (
     CreateTodoRequest,
     DeleteTodoRequest,
     ListTodosRequest,
+    UpdateTodoRequest,
 )
 
 router = APIRouter()
@@ -48,6 +49,24 @@ async def create_todo(
     except Exception as e:
         logger.error("create_todo_error", error=str(e))
         return APIResponse(success=False, error="Failed to create todo")
+
+
+@router.post("/update", response_model=APIResponse)
+@limiter.limit("100/minute")
+async def update_todo(
+    request: Request,
+    body: UpdateTodoRequest,
+    _api_key: str = Depends(verify_api_key),
+) -> APIResponse:
+    logger.info("update_todo", todo_id=str(body.todo_id), title=body.title)
+    try:
+        result = todos_service.update_todo(body.todo_id, body.title)
+        return APIResponse(success=True, data=result)
+    except ValueError as e:
+        return APIResponse(success=False, error=str(e))
+    except Exception as e:
+        logger.error("update_todo_error", error=str(e))
+        return APIResponse(success=False, error="Failed to update todo")
 
 
 @router.post("/complete", response_model=APIResponse)

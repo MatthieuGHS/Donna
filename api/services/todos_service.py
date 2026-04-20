@@ -44,6 +44,18 @@ def create_todo(title: str, deadline: date | None, priority: Priority) -> dict:
     return todo
 
 
+def update_todo(todo_id: UUID, title: str) -> dict:
+    """Rename a todo."""
+    client = _get_client()
+    result = client.table("todos").update({"title": title}).eq("id", str(todo_id)).execute()
+
+    if not result.data:
+        raise ValueError(f"Todo {todo_id} not found")
+
+    logger.info("todos_update", todo_id=str(todo_id), title=title)
+    return result.data[0]
+
+
 def complete_todo(todo_id: UUID) -> dict:
     """Mark a todo as done."""
     client = _get_client()

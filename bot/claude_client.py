@@ -134,6 +134,18 @@ TOOLS = [
         },
     },
     {
+        "name": "update_todo",
+        "description": "Renomme une todo existante.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todo_id": {"type": "string", "description": "ID de la todo"},
+                "title": {"type": "string", "description": "Nouveau titre"},
+            },
+            "required": ["todo_id", "title"],
+        },
+    },
+    {
         "name": "complete_todo",
         "description": "Marque une todo comme faite.",
         "input_schema": {
@@ -233,6 +245,7 @@ TOOL_ENDPOINT_MAP = {
     "delete_event": "/calendar/delete_event",
     "list_todos": "/todos/list",
     "create_todo": "/todos/create",
+    "update_todo": "/todos/update",
     "complete_todo": "/todos/complete",
     "delete_todo": "/todos/delete",
     "list_rules": "/rules/list",

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import email
 import imaplib
-import re
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.message import Message
@@ -323,64 +322,21 @@ def sync_recent_unread(limit: int = 5) -> dict:
 
 
 def _serialize(row: dict, include_body: bool) -> dict:
+    """Return the minimal set of fields Claude or the bot needs.
+
+    message_id and notified_in_recap are intentionally omitted to reduce token
+    footprint when Claude enumerates the cache.
+    """
     out = {
         "id": row.get("id"),
-        "message_id": row.get("message_id"),
         "sender_name": row.get("sender_name"),
         "sender_email": row.get("sender_email"),
         "subject": row.get("subject"),
         "received_at": row.get("received_at"),
-        "notified_in_recap": row.get("notified_in_recap", False),
     }
     if include_body:
         out["body"] = row.get("body")
     return out
-
-
-# PostgREST `or=` filter: wildcards for ILIKE are `*` (not `%` — the server
-# converts `*` to `%` itself). We strip any `*`/`%`/`_` from user input so
-# they're treated as literal spaces, and strip `,`/`(`/`)`/`"` which would
-# break the `or=(...)` filter syntax.
-_QUERY_UNSAFE = re.compile(r"[%_*\\,()\"]")
-
-
-def _sanitize_ilike(value: str) -> str:
-    """Strip characters that would either corrupt the PostgREST `or=` syntax
-    or be interpreted as SQL wildcards. User input is matched literally."""
-    return _QUERY_UNSAFE.sub(" ", value).strip()
-
-
-def search_emails(
-    query: str | None = None,
-    received_after: datetime | None = None,
-    received_before: datetime | None = None,
-    limit: int = 10,
-) -> list[dict]:
-    """Search cached emails by substring on sender/subject and/or date range."""
-    client = _get_client()
-    limit = max(1, min(limit, 30))
-
-    q = client.table("emails").select("*")
-
-    if query:
-        safe = _sanitize_ilike(query.strip())
-        if safe:
-            # PostgREST ILIKE wildcard is `*` (server converts to `%`).
-            pattern = f"*{safe}*"
-            q = q.or_(
-                f"sender_name.ilike.{pattern},"
-                f"sender_email.ilike.{pattern},"
-                f"subject.ilike.{pattern}"
-            )
-
-    if received_after is not None:
-        q = q.gte("received_at", received_after.isoformat())
-    if received_before is not None:
-        q = q.lte("received_at", received_before.isoformat())
-
-    result = q.order("received_at", desc=True).limit(limit).execute()
-    logger.info("emails_search", query=query, count=len(result.data))
-    return [_serialize(r, include_body=False) for r in result.data]
 
 
 def get_email(email_id: UUID) -> dict | None:

@@ -33,22 +33,25 @@ SYSTEM_PROMPT = """Tu es Donna, un assistant personnel intelligent et bienveilla
 - Quand l'utilisateur demande de supprimer quelque chose, crée une pending_action et demande confirmation
 - Formate tes réponses pour Telegram (Markdown simple, pas de fioritures)
 
-## Règle CRUCIALE pour économiser les tokens : tools "display_*" vs tools "list_*"/"get_*"
+## Règle CRUCIALE pour économiser les tokens : tools "display_*" vs tools "list_*"
 
 Tu as deux familles de tools pour les todos et les mails :
 
 1. **Tools `display_*`** (`display_todos`, `display_unread_emails`, `display_email`) : le bot envoie le résultat DIRECTEMENT à l'utilisateur, formaté côté bot. Tu ne vois PAS le contenu, donc tu ne consommes PAS de tokens sur les données. Après l'appel, réponds TRÈS brièvement (ex: "Voilà.") ou rien. **NE RECOPIE JAMAIS** le contenu affiché.
 
-2. **Tools `list_*` / `get_*` / `search_*`** (`list_todos`, `list_unread_emails`, `get_email`, `search_emails`) : toi tu vois les données et tu dois les recopier/résumer. Consomme beaucoup de tokens.
+2. **Tools `list_*`** (`list_todos`, `list_unread_emails`) : toi tu vois des métadonnées légères que tu peux filtrer/recopier.
+
+**IMPORTANT — tu n'as JAMAIS accès au corps des mails.** Seulement aux métadonnées (sender_name, sender_email, subject, received_at). Si l'utilisateur demande un résumé, une analyse ou une info précise tirée du corps d'un mail, tu ne peux PAS la donner — propose d'afficher le mail complet via `display_email` pour qu'il le lise lui-même.
 
 **Règle de choix :**
-- L'utilisateur veut juste VOIR ses données (ex: "mes mails", "mes todos", "affiche le mail de X", "mes mails des 3 derniers jours") → utilise `display_*`.
-- L'utilisateur veut une ANALYSE / RÉSUMÉ / ANSWER sur les données (ex: "combien de todos avec deadline cette semaine ?", "résume le mail de X", "qui m'a écrit à propos de alternance ?", "est-ce que Jean m'a écrit récemment ?") → utilise les tools `list_*` / `get_*` / `search_*` puis réponds.
-- En cas de doute, **préfère `display_*`** (plus économe). Si le seul affichage ne suffit pas, tu peux toujours enchaîner.
+- L'utilisateur veut juste VOIR ses données (ex: "mes mails", "mes todos") → utilise `display_*`.
+- L'utilisateur veut IDENTIFIER un mail précis pour l'afficher (ex: "affiche le mail sur les bourses Erasmus", "montre le mail de Durand du 22/04") → `list_unread_emails(days=30, limit=30)` → repère l'id qui correspond (matching sur sender + subject) → `display_email(id)`.
+- L'utilisateur demande une analyse d'un mail (ex: "résume le mail de X", "que dit le mail sur le jury ?") → dis que tu n'as accès qu'au sujet et à l'expéditeur, et propose d'afficher le mail complet pour qu'il le lise.
+- En cas de doute, **préfère `display_*`** (plus économe).
 
 **Après une modification de todo** (création, complétion, renommage) : confirme brièvement sur une ligne ("Todo ajoutée." / "Todo complétée." / "Todo renommée."), puis appelle `display_todos` (filter="pending") — NE recopie PAS la liste, elle sera envoyée par le bot.
 
-**Mails école** : cache de 30 mails en base, synchronisé par le serveur à 7h/12h/17h. Tu ne déclenches JAMAIS de sync toi-même. Pour "affiche le mail complet de X du JJ/MM" : d'abord `search_emails` (métadonnées seules) pour trouver l'id, puis `display_email(id)`. Si aucun mail ne matche, dis-le simplement.
+**Mails école** : cache de 30 mails en base, synchronisé par le serveur à 7h/12h/17h. Tu ne déclenches JAMAIS de sync toi-même. C'est TOI qui fais la recherche : tu énumères avec `list_unread_emails` et tu choisis le bon id sur la base du sender et du subject. Si aucun mail ne matche, dis-le simplement.
 
 - Aujourd'hui nous sommes le {{current_date}} et le fuseau horaire est {{timezone}}
 """.replace("{max_destructive}", str(MAX_DESTRUCTIVE_ACTIONS_PER_MESSAGE))
@@ -254,30 +257,6 @@ TOOLS = [
         },
     },
     {
-        "name": "search_emails",
-        "description": "Cherche dans le cache des mails école (30 derniers, synchronisés depuis Zimbra). Filtre par expéditeur (nom ou email), sujet, et/ou fenêtre de date. Ne renvoie PAS le corps du mail. Utilise ensuite get_email pour le corps complet.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Texte à chercher dans sender_name / sender_email / subject (substring, insensible à la casse)"},
-                "received_after": {"type": "string", "description": "Date ISO (YYYY-MM-DD) ou datetime ISO 8601 : mails reçus à partir de cette date incluse"},
-                "received_before": {"type": "string", "description": "Date ISO (YYYY-MM-DD) ou datetime ISO 8601 : mails reçus jusqu'à cette date incluse"},
-                "limit": {"type": "integer", "description": "Nombre maximum de résultats (1-30)", "default": 10},
-            },
-        },
-    },
-    {
-        "name": "get_email",
-        "description": "Lit le corps complet d'un mail pour que TOI-MÊME tu l'analyses, le résumes, ou en extraies une info précise. N'utilise PAS ce tool pour afficher le mail à l'utilisateur — pour ça, utilise display_email (qui l'envoie directement sans passer par toi, ce qui évite de consommer des tokens inutiles).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "email_id": {"type": "string", "description": "UUID du mail"},
-            },
-            "required": ["email_id"],
-        },
-    },
-    {
         "name": "display_email",
         "description": "Envoie DIRECTEMENT un mail complet à l'utilisateur, formaté par le bot (tu ne vois pas le corps, donc tu ne consommes pas de tokens). Après cet appel, réponds TRÈS brièvement (ex: 'Voilà.' ou une phrase courte de contexte). Ne recopie JAMAIS le contenu du mail.",
         "input_schema": {
@@ -311,12 +290,12 @@ TOOLS = [
     },
     {
         "name": "list_unread_emails",
-        "description": "Liste les mails en cache reçus dans les X derniers jours (défaut 2), triés du plus récent au plus ancien. Ne renvoie PAS le corps du mail.",
+        "description": "Énumère les mails en cache (métadonnées seules : id, sender_name, sender_email, subject, received_at — PAS de body). Utilise ce tool DÈS QUE tu dois identifier/choisir un mail en particulier (ex: 'le mail sur les bourses Erasmus', 'le mail de Durand'). Passe `days=30, limit=30` pour voir tout le cache (il n'y a que 30 mails max). Fais le filtrage/choix TOI-MÊME sur la liste renvoyée puis utilise display_email/get_email avec l'id choisi.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "days": {"type": "integer", "description": "Nombre de jours à considérer (1-30)", "default": 2},
-                "limit": {"type": "integer", "description": "Nombre maximum de résultats (1-30)", "default": 10},
+                "days": {"type": "integer", "description": "Nombre de jours (1-30). Passe 30 pour voir tout le cache.", "default": 30},
+                "limit": {"type": "integer", "description": "Nombre max de mails (1-30). Passe 30 pour voir tout le cache.", "default": 30},
             },
         },
     },
@@ -341,8 +320,6 @@ TOOL_ENDPOINT_MAP = {
     "create_pending": "/pending/create",
     "list_pending": "/pending/list",
     "resolve_pending": "/pending/resolve",
-    "search_emails": "/emails/search",
-    "get_email": "/emails/get",
     "list_unread_emails": "/emails/list_unread",
     # display_email is handled specially (bypasses Claude for the body). Not a
     # direct passthrough — see process_message.

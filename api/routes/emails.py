@@ -12,7 +12,6 @@ from db.models import (
     ListUnreadEmailsRequest,
     MarkNotifiedRequest,
     RecapEmailsRequest,
-    SearchEmailsRequest,
     SyncEmailsRequest,
 )
 
@@ -34,27 +33,6 @@ async def sync_emails(
     except Exception as e:
         logger.error("sync_emails_error", error=str(e))
         return APIResponse(success=False, error="Failed to sync emails")
-
-
-@router.post("/search", response_model=APIResponse)
-@limiter.limit("100/minute")
-async def search_emails(
-    request: Request,
-    body: SearchEmailsRequest,
-    _api_key: str = Depends(verify_api_key),
-) -> APIResponse:
-    logger.info("search_emails", has_query=bool(body.query))
-    try:
-        emails = email_service.search_emails(
-            query=body.query,
-            received_after=body.received_after,
-            received_before=body.received_before,
-            limit=body.limit,
-        )
-        return APIResponse(success=True, data={"emails": emails})
-    except Exception as e:
-        logger.error("search_emails_error", error=str(e))
-        return APIResponse(success=False, error="Failed to search emails")
 
 
 @router.post("/get", response_model=APIResponse)

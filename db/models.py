@@ -170,13 +170,6 @@ class SyncEmailsRequest(BaseModel):
     pass
 
 
-class SearchEmailsRequest(BaseModel):
-    query: str | None = Field(default=None, max_length=200)
-    received_after: datetime | None = None
-    received_before: datetime | None = None
-    limit: int = Field(default=10, gt=0, le=30)
-
-
 class GetEmailRequest(BaseModel):
     email_id: UUID
 

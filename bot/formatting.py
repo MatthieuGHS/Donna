@@ -16,9 +16,6 @@ from config import settings
 # Leave margin below Telegram's 4096 hard cap
 TELEGRAM_MESSAGE_LIMIT = 4000
 
-# Max non-whitespace chars to keep in an email body when displaying
-EMAIL_BODY_VISIBLE_CHARS = 500
-
 
 def _local_timezone():
     return pytz.timezone(settings.timezone)
@@ -32,28 +29,12 @@ def _format_datetime(iso: str, fmt: str) -> str:
         return iso
 
 
-def _truncate_body(body: str, max_non_whitespace: int = EMAIL_BODY_VISIBLE_CHARS) -> str:
-    """Keep at most `max_non_whitespace` visible chars, cut at word boundary."""
-    if not body:
-        return ""
-
-    count = 0
-    cut_at = len(body)
-    for i, ch in enumerate(body):
-        if not ch.isspace():
-            count += 1
-            if count > max_non_whitespace:
-                cut_at = i
-                break
-
-    if cut_at >= len(body):
-        return body
-
-    return body[:cut_at].rstrip() + "\n\n...[tronqué]"
-
-
 def format_full_email(mail: dict) -> str:
-    """Render a full email as a plain-text Telegram message (truncated for display)."""
+    """Render a full email as a plain-text Telegram message.
+
+    Only constraint is Telegram's 4096-char hard cap; if a body exceeds it,
+    the excess is cut with a '[tronqué]' marker (rare for normal mail).
+    """
     sender_name = (mail.get("sender_name") or "").strip()
     sender_email = (mail.get("sender_email") or "").strip()
     if sender_name and sender_email:
@@ -64,10 +45,9 @@ def format_full_email(mail: dict) -> str:
     subject = (mail.get("subject") or "(sans sujet)").strip()
     date_line = _format_datetime(mail.get("received_at") or "", "%d/%m/%Y %H:%M")
 
-    body = _truncate_body((mail.get("body") or "").strip() or "(corps vide)")
+    body = (mail.get("body") or "").strip() or "(corps vide)"
 
     header = f"{from_line}\nDate : {date_line}\nSujet : {subject}\n\n"
-    # Extra safety net against Telegram's hard cap
     budget = TELEGRAM_MESSAGE_LIMIT - len(header) - len("\n\n...[tronqué]")
     if len(body) > budget:
         body = body[:budget] + "\n\n...[tronqué]"

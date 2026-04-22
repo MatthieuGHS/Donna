@@ -1,8 +1,8 @@
 # Donna
 
-A personal assistant powered by Telegram, Claude AI, Google Calendar and Supabase.
+A personal assistant powered by Telegram, Claude AI, Google Calendar, Zimbra IMAP and Supabase.
 
-Talk to Donna in natural language (text or voice) to manage your calendar, todos, and personal rules.
+Talk to Donna in natural language (text or voice) to manage your calendar, todos, personal rules, and read your school emails.
 
 ## Features
 
@@ -11,11 +11,13 @@ Talk to Donna in natural language (text or voice) to manage your calendar, todos
 - **Todos** — create, complete, rename, delete tasks with priorities and deadlines
 - **Rules** — define personal rules and preferences stored in database
 - **Smart scheduling** — find free slots, check availability across all calendar sources
-- **Conflict detection** — refuses to create events that overlap with existing ones (unless forced)
+- **Conflict detection** — creating an event that overlaps with an existing one triggers a Confirmer/Annuler inline button (never an open-ended question from Donna)
 - **Destructive action safety** — all deletions require explicit confirmation via inline buttons
-- **Daily recaps** — automated morning (today's schedule) and afternoon (tomorrow's preview) summaries
+- **Daily recaps** — automated morning (7h) and afternoon (13h) recaps, split into three separate messages: agenda, todos, emails
 - **Voice messages** — transcribed via Google Speech-to-Text, then processed as text
 - **Event invites** — create events with attendees who receive email invitations
+- **Email cache (Zimbra IMAP)** — rolling window of the 30 most recent unread school emails, synced automatically 3×/day (7h/12h/17h). Donna never triggers a sync herself — she reads from the cache
+- **Token-saving display pattern** — requests to *view* an email, todo list or unread mailbox bypass the LLM entirely: the bot fetches directly from Supabase and sends a separate Telegram message. Claude only sees metadata for identification, never the email body
 
 ## Architecture
 
@@ -26,29 +28,45 @@ Talk to Donna in natural language (text or voice) to manage your calendar, todos
 │                     │ + key │                       │
 │ - Receives messages │       │ - Exposes tools       │
 │ - Calls Claude API  │       │ - Auth + rate limit   │
-│ - Sends recaps      │       │ - Audit logging       │
-│ - Scheduler 7h/13h  │       │                       │
+│ - Sends recaps      │       │ - IMAP fetcher        │
+│ - Scheduler 7h/13h  │       │ - Audit logging       │
+│ - Email sync crons  │       │                       │
+│   (7h/12h/17h)      │       │                       │
 └─────────────────────┘       └──────────┬────────────┘
                                          │
-                             ┌───────────┼───────────┐
-                             v           v           v
-                      ┌──────────┐ ┌──────────┐ ┌────────┐
-                      │ Supabase │ │ Google   │ │ Zimbra │
-                      │ Postgres │ │ Calendar │ │  ICS   │
-                      └──────────┘ └──────────┘ └────────┘
+                            ┌────────────┼───────────┬──────────┐
+                            v            v           v          v
+                      ┌──────────┐ ┌──────────┐ ┌────────┐ ┌───────────┐
+                      │ Supabase │ │ Google   │ │ Zimbra │ │ Zimbra    │
+                      │ Postgres │ │ Calendar │ │  ICS   │ │  IMAP     │
+                      └──────────┘ └──────────┘ └────────┘ └───────────┘
 ```
 
 **Message pipeline:**
 1. Telegram message received (text or voice)
 2. Chat ID verified against whitelist
-3. Voice messages: OGG -> WAV (ffmpeg) -> Google Speech-to-Text -> text
+3. Voice messages: OGG → WAV (ffmpeg) → Google Speech-to-Text → text
 4. Text sent to Claude API with tool definitions
 5. Claude calls tools as needed (each tool = HTTP call to FastAPI API)
 6. API executes operations on Supabase / Google Calendar / Zimbra
 7. Results returned to Claude for final response
-8. Response sent back to user on Telegram
+8. Response sent back to user on Telegram — plus, for "display" intents, one or more extra messages rendered directly by the bot from Supabase (no tokens spent on the body)
 
 Claude is **stateless** — no conversation history. All data is retrieved via tool calls on each message.
+
+### Token-saving "display" tools
+
+Viewing data (emails, todos) is the most frequent interaction and would normally force Claude to echo every character — wasting output tokens. Donna ships a family of `display_*` tools that bypass the LLM entirely for rendering:
+
+| Tool | Claude sees | User receives |
+|---|---|---|
+| `display_email(email_id)` | `{shown: true}` only | A second Telegram message rendered by the bot from Supabase |
+| `display_unread_emails(days, limit)` | `{shown: true}` only | A second Telegram message with the list |
+| `display_todos(filter)` | `{shown: true}` only | A second Telegram message with the list |
+
+For every such request, Claude's final reply is a two-word confirmation ("Voilà."). The email body never enters Claude's context — you pay a fixed ~$0.02 per query regardless of mail size.
+
+For analysis intents (resume, extract, compare) Claude still uses `list_unread_emails` / `list_todos`, which return lightweight metadata only.
 
 ## Tech Stack
 
@@ -61,6 +79,7 @@ Claude is **stateless** — no conversation history. All data is retrieved via t
 | Scheduler | `APScheduler` |
 | Calendar | Google Calendar API (Service Account) |
 | School schedule | Zimbra ICS (HTTP Basic Auth + `icalendar`) |
+| School mail | Zimbra IMAPS (stdlib `imaplib` + `beautifulsoup4` for body layout) |
 | Voice | Google Speech-to-Text + `ffmpeg` |
 | Database | Supabase (PostgreSQL) |
 | Rate limiting | `slowapi` |
@@ -75,9 +94,10 @@ donna/
 │   ├── main.py              # Bot entry point + scheduler
 │   ├── handlers.py          # Text, voice, and inline button handlers
 │   ├── security.py          # Chat ID whitelist
-│   ├── claude_client.py     # Claude API wrapper + tool definitions
+│   ├── claude_client.py     # Claude API wrapper + tool definitions + display_* routing
+│   ├── formatting.py        # Shared Telegram renderers (emails, todos)
 │   ├── api_client.py        # HTTP client for FastAPI
-│   └── recap.py             # Morning/afternoon recap generation
+│   └── recap.py             # Morning/afternoon recap generation (agenda + todos + emails, 3 messages)
 ├── api/
 │   ├── main.py              # FastAPI app
 │   ├── auth.py              # API key verification (constant-time)
@@ -87,17 +107,19 @@ donna/
 │   │   ├── calendar.py      # Calendar endpoints (Google + Zimbra merged)
 │   │   ├── todos.py         # Todo CRUD endpoints
 │   │   ├── rules.py         # Rules endpoints
-│   │   └── pending.py       # Pending action endpoints
+│   │   ├── pending.py       # Pending action endpoints
+│   │   └── emails.py        # Email cache endpoints (sync / get / list_unread / recap / mark_notified)
 │   └── services/
 │       ├── calendar_service.py   # Google Calendar API wrapper
 │       ├── zimbra_service.py     # Zimbra ICS fetch + parse + cache
+│       ├── email_service.py      # Zimbra IMAP fetcher + Supabase email cache (rolling 30)
 │       ├── todos_service.py      # Supabase CRUD
 │       ├── rules_service.py      # Supabase CRUD
 │       └── pending_service.py    # Pending actions + expiration
 ├── db/
 │   ├── models.py            # Pydantic schemas
 │   ├── fixtures.py          # Dev seed data (refuses to run in prod)
-│   └── migrations/          # Idempotent SQL scripts
+│   └── migrations/          # Idempotent SQL scripts (001 → 006)
 ├── config.py                # pydantic-settings, loads .env
 ├── requirements.txt
 ├── .env.example
@@ -113,6 +135,7 @@ donna/
 - Python 3.11+
 - ffmpeg installed (`sudo apt install ffmpeg` or `brew install ffmpeg`)
 - Accounts: Telegram, Anthropic, Google Cloud, Supabase
+- Optional: a Zimbra account (school/work) if you want the ICS calendar and mail cache
 
 ### Step 1 — Telegram Bot
 
@@ -153,7 +176,7 @@ donna/
 1. Go to [supabase.com](https://supabase.com/dashboard)
 2. Create a new project
 3. Note the **Project URL** and **service_role key** (Settings > API)
-4. Run the migration scripts from `db/migrations/` in the **SQL Editor**, in order (001 through 005)
+4. Run the migration scripts from `db/migrations/` in the **SQL Editor**, in order (001 through 006)
 
 ### Step 5 — Generate internal API key
 
@@ -170,7 +193,7 @@ cp .env.example .env
 
 For `GOOGLE_SERVICE_ACCOUNT_JSON`, paste the entire JSON content on a single line.
 
-Zimbra variables are **optional** — if not set, the bot works with Google Calendar only.
+Zimbra variables are **optional** — if not set, the bot works with Google Calendar only. Set `ZIMBRA_IMAP_HOST` only if you want the email cache feature (still needs `ZIMBRA_USER` and `ZIMBRA_PASSWORD`).
 
 ### Step 7 — Install and run locally
 
@@ -205,11 +228,14 @@ python -m bot.main
 |-------|-----------|
 | Telegram | Chat ID whitelist — unauthorized users silently ignored |
 | API | `X-API-Key` header with constant-time comparison (anti timing attack) |
-| Rate limiting | 100 requests/minute per IP |
+| Rate limiting | 100 requests/minute per IP (30 req/min on `/emails/sync`) |
 | Database | Row Level Security on all tables (deny all for anon role) |
 | Deletions | All destructive actions require confirmation via inline buttons |
+| Event conflicts | Creating an event over an existing one triggers a pending_action (Confirmer/Annuler) — Donna never asks an open-ended question she can't follow up on |
 | Prompt injection | Max 5 destructive actions per message, locked system prompt |
 | Secrets | All in environment variables, never in code |
+| Zimbra IMAP | IMAPS only (TLS on port 993), password never logged, `BODY.PEEK[]` keeps server-side unread status untouched |
+| Email access | Claude sees metadata only (sender/subject/date) — email bodies never enter LLM context |
 | Production | FastAPI docs/OpenAPI disabled, no stack traces exposed |
 
 ## API Endpoints
@@ -235,6 +261,11 @@ All endpoints require `X-API-Key` header.
 | `POST /pending/create` | Create pending action |
 | `POST /pending/list` | List pending actions |
 | `POST /pending/resolve` | Confirm or cancel pending action |
+| `POST /emails/sync` | Pull the most recent UNSEEN mails from Zimbra IMAP into the cache (rolling 30) |
+| `POST /emails/list_unread` | List cached emails from the last N days (metadata only) |
+| `POST /emails/get` | Return a single cached email with its body (used internally by the bot for direct rendering) |
+| `POST /emails/recap` | Return up to 5 non-notified emails for the recap + overflow count |
+| `POST /emails/mark_notified` | Flag emails as shown in a recap |
 | `GET /health` | Health check |
 
 ## License

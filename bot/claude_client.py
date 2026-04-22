@@ -466,9 +466,11 @@ async def process_message(user_message: str, current_date: str) -> tuple[str, li
             # the body/list never enters Claude's context.
             if tool_name in _DISPLAY_TOOLS:
                 try:
+                    logger.info("display_tool_invoked", tool=tool_name)
                     content, rendered = await _handle_display_tool(tool_name, tool_input)
                     if rendered is not None:
                         display_messages.append(rendered)
+                        logger.info("display_message_queued", tool=tool_name, chars=len(rendered))
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,

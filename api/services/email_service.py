@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import email
 import imaplib
+import re
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.message import Message
@@ -22,8 +23,8 @@ from email.utils import parseaddr, parsedate_to_datetime
 from typing import Any
 from uuid import UUID
 
-import html2text
 import structlog
+from bs4 import BeautifulSoup, NavigableString
 from supabase import create_client
 
 from config import settings
@@ -34,10 +35,41 @@ logger = structlog.get_logger(__name__)
 # rare emails exceeding it are still usable for search/preview.
 _MAX_BODY_CHARS = 200_000
 
-_html_converter = html2text.HTML2Text()
-_html_converter.ignore_images = True
-_html_converter.ignore_links = False
-_html_converter.body_width = 0  # don't rewrap lines
+# HTML block-level tags: we force newlines around their content so the layout
+# survives the conversion to plain text.
+_BLOCK_TAGS = {
+    "address", "article", "aside", "blockquote", "div", "dd", "dl", "dt",
+    "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+    "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "noscript", "ol",
+    "p", "pre", "section", "table", "tfoot", "thead", "tr", "ul",
+}
+
+_MULTI_BLANK_LINES = re.compile(r"\n{3,}")
+_TRAILING_SPACES = re.compile(r"[ \t]+\n")
+
+
+def _html_to_text(html: str) -> str:
+    """Convert HTML to plain text while preserving paragraph/line structure."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Strip non-visible content
+    for tag in soup(["script", "style", "head", "meta", "link"]):
+        tag.decompose()
+
+    # Convert <br> to newlines
+    for br in soup.find_all("br"):
+        br.replace_with(NavigableString("\n"))
+
+    # Insert a newline after every block-level element's content
+    for block in soup.find_all(lambda t: t.name in _BLOCK_TAGS):
+        block.append(NavigableString("\n"))
+
+    text = soup.get_text()
+
+    # Cleanup
+    text = _TRAILING_SPACES.sub("\n", text)
+    text = _MULTI_BLANK_LINES.sub("\n\n", text)
+    return text.strip()
 
 
 def _get_client():
@@ -64,8 +96,10 @@ def _decode_header(raw: Any) -> str:
 
 
 def _extract_body(msg: Message) -> str:
-    """Extract body as plain text. Prefers text/plain, falls back to html2text.
+    """Extract body as plain text while preserving the original layout.
 
+    Prefers text/html (always structured) converted via BeautifulSoup.
+    Falls back to text/plain if no HTML part is present.
     Skips attachments (any part with Content-Disposition: attachment).
     """
     plain_parts: list[str] = []
@@ -109,10 +143,10 @@ def _extract_body(msg: Message) -> str:
         else:
             plain_parts.append(text)
 
-    if plain_parts:
+    if html_parts:
+        body = _html_to_text("\n".join(html_parts))
+    elif plain_parts:
         body = "\n".join(p.strip() for p in plain_parts if p.strip())
-    elif html_parts:
-        body = _html_converter.handle("\n".join(html_parts))
     else:
         body = ""
 

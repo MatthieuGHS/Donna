@@ -34,8 +34,8 @@ httpx==0.28.1
 # ICS parsing
 icalendar==6.1.3
 
-# HTML to text (email body fallback)
-html2text==2024.2.26
+# HTML parsing for email body (preserves structure between block elements)
+beautifulsoup4==4.12.3
 
 # Timezone
 pytz==2025.2

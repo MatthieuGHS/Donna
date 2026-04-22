@@ -46,6 +46,24 @@ SYSTEM_PROMPT = """Tu es Donna, un assistant personnel intelligent et bienveilla
   - `list_unread_emails` : renvoie les mails reçus dans les X derniers jours (défaut 2).
   - Pour "affiche le mail complet de X du JJ/MM", utilise d'abord `search_emails` avec `query` et `received_after`/`received_before` pour trouver le bon id, puis `get_email`.
   - Si un mail demandé n'existe pas dans le cache, dis-le simplement (ex : "Aucun mail trouvé pour X dans le cache des 30 derniers").
+  - Pour afficher une LISTE de mails (list_unread_emails, search_emails), utilise CE format EXACT, sans numérotation :
+
+    [phrase courte, ex: "5 mails non-lus (3 derniers jours) :"]
+
+    JJ/MM HH:MM — Expéditeur
+    Sujet du mail
+
+    JJ/MM HH:MM — Expéditeur
+    Sujet du mail
+
+    Règles : ligne vide entre chaque mail, date au format JJ/MM HH:MM (pas d'année), expéditeur = sender_name si présent sinon sender_email, sujet sur la ligne d'après (pas d'indentation), tronque le sujet à ~80 caractères avec `...` si plus long, pas de gras, pas d'emoji ajouté par toi (garde ceux du sujet s'il y en a).
+  - Pour afficher un MAIL COMPLET (get_email), utilise ce format :
+
+    De : Expéditeur <email>
+    Date : JJ/MM/AAAA HH:MM
+    Sujet : [sujet]
+
+    [corps du mail]
 - Aujourd'hui nous sommes le {{current_date}} et le fuseau horaire est {{timezone}}
 """.replace("{max_destructive}", str(MAX_DESTRUCTIVE_ACTIONS_PER_MESSAGE))
 

@@ -337,20 +337,17 @@ def _serialize(row: dict, include_body: bool) -> dict:
     return out
 
 
-_ILIKE_WILDCARDS = re.compile(r"[%_\\]")
-# PostgREST `or=` filter is comma-separated and uses parens for grouping,
-# so we strip those characters from user input before interpolating.
-_PG_FILTER_BREAKERS = re.compile(r"[,()\"]")
+# PostgREST `or=` filter: wildcards for ILIKE are `*` (not `%` — the server
+# converts `*` to `%` itself). We strip any `*`/`%`/`_` from user input so
+# they're treated as literal spaces, and strip `,`/`(`/`)`/`"` which would
+# break the `or=(...)` filter syntax.
+_QUERY_UNSAFE = re.compile(r"[%_*\\,()\"]")
 
 
 def _sanitize_ilike(value: str) -> str:
-    """Prepare a user string for ILIKE inside a PostgREST `or_` filter.
-
-    - Escapes ILIKE wildcards so they match literally.
-    - Strips characters that would break the `or=(...)` filter syntax.
-    """
-    escaped = _ILIKE_WILDCARDS.sub(lambda m: "\\" + m.group(0), value)
-    return _PG_FILTER_BREAKERS.sub(" ", escaped).strip()
+    """Strip characters that would either corrupt the PostgREST `or=` syntax
+    or be interpreted as SQL wildcards. User input is matched literally."""
+    return _QUERY_UNSAFE.sub(" ", value).strip()
 
 
 def search_emails(
@@ -368,7 +365,8 @@ def search_emails(
     if query:
         safe = _sanitize_ilike(query.strip())
         if safe:
-            pattern = f"%{safe}%"
+            # PostgREST ILIKE wildcard is `*` (server converts to `%`).
+            pattern = f"*{safe}*"
             q = q.or_(
                 f"sender_name.ilike.{pattern},"
                 f"sender_email.ilike.{pattern},"

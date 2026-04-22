@@ -5,6 +5,7 @@ import structlog
 from anthropic import Anthropic
 
 from bot.api_client import api_client, MAX_DESTRUCTIVE_ACTIONS_PER_MESSAGE
+from bot.formatting import format_emails_list, format_full_email, format_todos_list
 from config import settings
 
 logger = structlog.get_logger(__name__)
@@ -29,41 +30,26 @@ SYSTEM_PROMPT = """Tu es Donna, un assistant personnel intelligent et bienveilla
 - Les events Zimbra sont read-only (pas de création/modification/suppression). Seuls les events Google peuvent être modifiés.
 - Quand l'utilisateur demande de créer un event, vérifie d'abord la disponibilité (les deux sources sont vérifiées pour les conflits)
 - En cas de conflit lors d'une création d'event, ne demande PAS à l'utilisateur ce qu'il veut faire. Crée directement une pending_action avec action_payload={"action":"create_event","params":{"title":..., "start":..., "end":..., "description":..., "attendees":..., "force":true}} et description explicite mentionnant le conflit (ex : "Créer 'X' le JJ/MM HHhMM malgré conflit avec 'Y'"). L'utilisateur cliquera sur Confirmer/Annuler.
-- Après TOUTE modification de todo (création, complétion, renommage), appelle list_todos (filter="pending") et affiche la liste complète des todos en cours, avec CE format EXACT (pas d'écart) :
-
-  [confirmation brève sur une ligne, ex: "Todo ajoutée." ou "Todo complétée."]
-
-  Todos en cours :
-  • Titre1 — AAAA-MM-JJ
-  • Titre2
-
-  Règles du format : ligne vide avant "Todos en cours :", pas de gras/italique, pas d'emoji, un bullet `•` par todo, ajoute `— AAAA-MM-JJ` seulement si deadline présente, "Aucune todo en cours." si la liste est vide.
 - Quand l'utilisateur demande de supprimer quelque chose, crée une pending_action et demande confirmation
 - Formate tes réponses pour Telegram (Markdown simple, pas de fioritures)
-- Mails école : tu peux consulter un cache de 30 mails récents en base (Supabase), synchronisé automatiquement depuis Zimbra par le serveur à 7h/12h/17h. Tu ne déclenches JAMAIS de synchronisation Zimbra toi-même — la base est ta seule source.
-  - `search_emails` : cherche par expéditeur (nom ou email) ou par sujet, avec filtres de date optionnels. Renvoie les métadonnées (pas le corps).
-  - `get_email` : renvoie le mail complet (corps inclus) à partir de son id.
-  - `list_unread_emails` : renvoie les mails reçus dans les X derniers jours (défaut 2).
-  - Pour "affiche le mail complet de X du JJ/MM", utilise d'abord `search_emails` avec `query` et `received_after`/`received_before` pour trouver le bon id, puis `get_email`.
-  - Si un mail demandé n'existe pas dans le cache, dis-le simplement (ex : "Aucun mail trouvé pour X dans le cache des 30 derniers").
-  - Pour afficher une LISTE de mails (list_unread_emails, search_emails), utilise CE format EXACT, sans numérotation :
 
-    [phrase courte, ex: "5 mails non-lus (3 derniers jours) :"]
+## Règle CRUCIALE pour économiser les tokens : tools "display_*" vs tools "list_*"/"get_*"
 
-    JJ/MM HH:MM — Expéditeur
-    Sujet du mail
+Tu as deux familles de tools pour les todos et les mails :
 
-    JJ/MM HH:MM — Expéditeur
-    Sujet du mail
+1. **Tools `display_*`** (`display_todos`, `display_unread_emails`, `display_email`) : le bot envoie le résultat DIRECTEMENT à l'utilisateur, formaté côté bot. Tu ne vois PAS le contenu, donc tu ne consommes PAS de tokens sur les données. Après l'appel, réponds TRÈS brièvement (ex: "Voilà.") ou rien. **NE RECOPIE JAMAIS** le contenu affiché.
 
-    Règles : ligne vide entre chaque mail, date au format JJ/MM HH:MM (pas d'année), expéditeur = sender_name si présent sinon sender_email, sujet sur la ligne d'après (pas d'indentation), tronque le sujet à ~80 caractères avec `...` si plus long, pas de gras, pas d'emoji ajouté par toi (garde ceux du sujet s'il y en a).
-  - Pour afficher un MAIL COMPLET (get_email), utilise ce format :
+2. **Tools `list_*` / `get_*` / `search_*`** (`list_todos`, `list_unread_emails`, `get_email`, `search_emails`) : toi tu vois les données et tu dois les recopier/résumer. Consomme beaucoup de tokens.
 
-    De : Expéditeur <email>
-    Date : JJ/MM/AAAA HH:MM
-    Sujet : [sujet]
+**Règle de choix :**
+- L'utilisateur veut juste VOIR ses données (ex: "mes mails", "mes todos", "affiche le mail de X", "mes mails des 3 derniers jours") → utilise `display_*`.
+- L'utilisateur veut une ANALYSE / RÉSUMÉ / ANSWER sur les données (ex: "combien de todos avec deadline cette semaine ?", "résume le mail de X", "qui m'a écrit à propos de alternance ?", "est-ce que Jean m'a écrit récemment ?") → utilise les tools `list_*` / `get_*` / `search_*` puis réponds.
+- En cas de doute, **préfère `display_*`** (plus économe). Si le seul affichage ne suffit pas, tu peux toujours enchaîner.
 
-    [corps du mail]
+**Après une modification de todo** (création, complétion, renommage) : confirme brièvement sur une ligne ("Todo ajoutée." / "Todo complétée." / "Todo renommée."), puis appelle `display_todos` (filter="pending") — NE recopie PAS la liste, elle sera envoyée par le bot.
+
+**Mails école** : cache de 30 mails en base, synchronisé par le serveur à 7h/12h/17h. Tu ne déclenches JAMAIS de sync toi-même. Pour "affiche le mail complet de X du JJ/MM" : d'abord `search_emails` (métadonnées seules) pour trouver l'id, puis `display_email(id)`. Si aucun mail ne matche, dis-le simplement.
+
 - Aujourd'hui nous sommes le {{current_date}} et le fuseau horaire est {{timezone}}
 """.replace("{max_destructive}", str(MAX_DESTRUCTIVE_ACTIONS_PER_MESSAGE))
 
@@ -282,13 +268,45 @@ TOOLS = [
     },
     {
         "name": "get_email",
-        "description": "Renvoie un mail complet (avec corps) à partir de son id (obtenu via search_emails ou list_unread_emails).",
+        "description": "Lit le corps complet d'un mail pour que TOI-MÊME tu l'analyses, le résumes, ou en extraies une info précise. N'utilise PAS ce tool pour afficher le mail à l'utilisateur — pour ça, utilise display_email (qui l'envoie directement sans passer par toi, ce qui évite de consommer des tokens inutiles).",
         "input_schema": {
             "type": "object",
             "properties": {
                 "email_id": {"type": "string", "description": "UUID du mail"},
             },
             "required": ["email_id"],
+        },
+    },
+    {
+        "name": "display_email",
+        "description": "Envoie DIRECTEMENT un mail complet à l'utilisateur, formaté par le bot (tu ne vois pas le corps, donc tu ne consommes pas de tokens). Après cet appel, réponds TRÈS brièvement (ex: 'Voilà.' ou une phrase courte de contexte). Ne recopie JAMAIS le contenu du mail.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description": "UUID du mail à afficher"},
+            },
+            "required": ["email_id"],
+        },
+    },
+    {
+        "name": "display_unread_emails",
+        "description": "Envoie DIRECTEMENT à l'utilisateur la liste des mails non-lus des X derniers jours (tu ne vois pas la liste, donc tu ne consommes pas de tokens sur les sujets/expéditeurs). À utiliser DÈS QUE l'utilisateur demande à voir ses mails sans vouloir d'analyse (ex: 'mes mails', 'mails non-lus', 'mails des 3 derniers jours'). Après l'appel, réponds très brièvement ou rien — tu ne recopies PAS la liste.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Nombre de jours (1-30, défaut 2)", "default": 2},
+                "limit": {"type": "integer", "description": "Nombre max de mails (1-30, défaut 10)", "default": 10},
+            },
+        },
+    },
+    {
+        "name": "display_todos",
+        "description": "Envoie DIRECTEMENT à l'utilisateur la liste des todos (tu ne vois pas la liste). À utiliser DÈS QUE l'utilisateur demande à voir ses todos sans vouloir d'analyse (ex: 'mes todos', 'mes tâches'). Après l'appel, réponds très brièvement ou rien — tu ne recopies PAS la liste.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter": {"type": "string", "enum": ["all", "pending", "done"], "description": "Filtre (défaut: pending)", "default": "pending"},
+            },
         },
     },
     {
@@ -326,16 +344,75 @@ TOOL_ENDPOINT_MAP = {
     "search_emails": "/emails/search",
     "get_email": "/emails/get",
     "list_unread_emails": "/emails/list_unread",
+    # display_email is handled specially (bypasses Claude for the body). Not a
+    # direct passthrough — see process_message.
 }
 
 
-async def process_message(user_message: str, current_date: str) -> tuple[str, list[dict]]:
+_DISPLAY_TOOLS = {"display_email", "display_unread_emails", "display_todos"}
+
+_SHOWN_OK = '{"success": true, "shown": true, "message": "Envoyé directement à l\'utilisateur. Réponds très brièvement (ex: \\"Voilà.\\"), ne recopie rien."}'
+
+
+async def _handle_display_tool(tool_name: str, tool_input: dict) -> tuple[str, str | None]:
+    """Execute a display_* tool: fetch from API, render, queue for Telegram.
+
+    Returns (tool_result_content, rendered_message_or_None).
+    rendered_message is None on error (in which case tool_result_content carries the error).
+    """
+    if tool_name == "display_email":
+        email_id = tool_input.get("email_id")
+        if not email_id:
+            return '{"success": false, "error": "email_id manquant"}', None
+        result = await api_client.call("/emails/get", {"email_id": email_id})
+        if not result.get("success"):
+            import json as _json
+            return _json.dumps(result, ensure_ascii=False), None
+        mail = result.get("data") or {}
+        return _SHOWN_OK, format_full_email(mail)
+
+    if tool_name == "display_unread_emails":
+        days = int(tool_input.get("days") or 2)
+        limit = int(tool_input.get("limit") or 10)
+        result = await api_client.call("/emails/list_unread", {"days": days, "limit": limit})
+        if not result.get("success"):
+            import json as _json
+            return _json.dumps(result, ensure_ascii=False), None
+        emails = (result.get("data") or {}).get("emails") or []
+        rendered = format_emails_list(
+            emails,
+            header=f"📧 {len(emails)} mail(s) non-lu(s) ({days} derniers jour(s)) :" if emails else "📧 Aucun mail non-lu.",
+        )
+        return _SHOWN_OK, rendered
+
+    if tool_name == "display_todos":
+        filter_ = tool_input.get("filter") or "pending"
+        result = await api_client.call("/todos/list", {"filter": filter_})
+        if not result.get("success"):
+            import json as _json
+            return _json.dumps(result, ensure_ascii=False), None
+        todos = (result.get("data") or {}).get("todos") or []
+        header_map = {
+            "pending": "📝 Todos en cours :",
+            "done": "✅ Todos terminées :",
+            "all": "📝 Toutes les todos :",
+        }
+        rendered = format_todos_list(todos, header=header_map.get(filter_, "📝 Todos :"))
+        return _SHOWN_OK, rendered
+
+    return '{"success": false, "error": "display tool inconnu"}', None
+
+
+async def process_message(user_message: str, current_date: str) -> tuple[str, list[dict], list[str]]:
     """Process a text message through Claude with tool use.
 
     Handles the full tool-use loop: send message -> execute tool calls -> return final response.
 
     Returns:
-        Tuple of (response_text, pending_actions_created).
+        Tuple of (response_text, pending_actions_created, display_messages).
+        `display_messages` contains pre-rendered Telegram messages (strings) the
+        bot should send directly — their content never enters Claude's context,
+        which saves tokens.
     """
     import json
 
@@ -347,6 +424,7 @@ async def process_message(user_message: str, current_date: str) -> tuple[str, li
 
     destructive_count = 0
     pending_actions_created: list[dict] = []
+    display_messages: list[str] = []
 
     # Tool use loop
     while True:
@@ -362,7 +440,7 @@ async def process_message(user_message: str, current_date: str) -> tuple[str, li
         if response.stop_reason == "end_turn":
             text_parts = [block.text for block in response.content if block.type == "text"]
             text = "\n".join(text_parts) if text_parts else "Je n'ai pas pu formuler de réponse."
-            return text, pending_actions_created
+            return text, pending_actions_created, display_messages
 
         # Process tool calls
         tool_results = []
@@ -383,6 +461,28 @@ async def process_message(user_message: str, current_date: str) -> tuple[str, li
                         "content": '{"success": false, "error": "Limite d\'actions destructives atteinte (max 5 par message)"}',
                     })
                     continue
+
+            # display_* tools: fetch from API, render, queue for Telegram —
+            # the body/list never enters Claude's context.
+            if tool_name in _DISPLAY_TOOLS:
+                try:
+                    content, rendered = await _handle_display_tool(tool_name, tool_input)
+                    if rendered is not None:
+                        display_messages.append(rendered)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": content,
+                    })
+                except Exception as e:
+                    logger.error("display_tool_failed", tool=tool_name, error=str(e))
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": '{"success": false, "error": "Erreur lors de l\'affichage"}',
+                        "is_error": True,
+                    })
+                continue
 
             # Execute tool via API
             endpoint = TOOL_ENDPOINT_MAP.get(tool_name)
@@ -425,7 +525,7 @@ async def process_message(user_message: str, current_date: str) -> tuple[str, li
         messages.append({"role": "user", "content": tool_results})
 
 
-async def process_voice_message(audio_data: bytes, current_date: str) -> tuple[str, list[dict]]:
+async def process_voice_message(audio_data: bytes, current_date: str) -> tuple[str, list[dict], list[str]]:
     """Process a voice message: transcribe with Google Speech-to-Text, then process as text.
 
     Step 1: Convert OGG to WAV via ffmpeg.
@@ -457,7 +557,7 @@ async def process_voice_message(audio_data: bytes, current_date: str) -> tuple[s
 
         if result.returncode != 0:
             logger.error("ffmpeg_conversion_failed", stderr=result.stderr.decode())
-            return "Impossible de traiter le message vocal.", []
+            return "Impossible de traiter le message vocal.", [], []
 
         with open(wav_path, "rb") as f:
             wav_data = f.read()
@@ -492,14 +592,14 @@ async def process_voice_message(audio_data: bytes, current_date: str) -> tuple[s
     results = response.get("results", [])
 
     if not results:
-        return "Je n'ai pas pu comprendre le message vocal.", []
+        return "Je n'ai pas pu comprendre le message vocal.", [], []
 
     transcription = " ".join(
         r["alternatives"][0]["transcript"] for r in results if r.get("alternatives")
     ).strip()
 
     if not transcription:
-        return "Je n'ai pas pu comprendre le message vocal.", []
+        return "Je n'ai pas pu comprendre le message vocal.", [], []
 
     logger.info("voice_transcribed", transcription=transcription)
 

@@ -33,9 +33,22 @@ def _build_pending_keyboard(pending_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-async def _send_response(update: Update, text: str, pending_actions: list[dict]) -> None:
-    """Send response text, then inline buttons for each pending action."""
-    await update.message.reply_text(text, parse_mode="Markdown")
+async def _send_response(
+    update: Update,
+    text: str,
+    pending_actions: list[dict],
+    display_messages: list[str] | None = None,
+) -> None:
+    """Send the text reply, then any pre-rendered display messages (no Markdown),
+    then inline-button prompts for pending actions."""
+    if text:
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    for msg in display_messages or []:
+        try:
+            await update.message.reply_text(msg)
+        except Exception as e:
+            logger.error("send_display_message_failed", error=str(e))
 
     for pending in pending_actions:
         keyboard = _build_pending_keyboard(pending["id"])
@@ -58,8 +71,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.chat.send_action("typing")
 
     try:
-        response_text, pending_actions = await process_message(user_message, _get_current_date())
-        await _send_response(update, response_text, pending_actions)
+        response_text, pending_actions, display_messages = await process_message(user_message, _get_current_date())
+        await _send_response(update, response_text, pending_actions, display_messages)
     except Exception as e:
         logger.error("text_handler_error", chat_id=chat_id, error=str(e))
         await update.message.reply_text(
@@ -91,8 +104,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         logger.info("voice_downloaded", chat_id=chat_id, size_bytes=len(audio_data))
 
-        response_text, pending_actions = await process_voice_message(audio_data, _get_current_date())
-        await _send_response(update, response_text, pending_actions)
+        response_text, pending_actions, display_messages = await process_voice_message(audio_data, _get_current_date())
+        await _send_response(update, response_text, pending_actions, display_messages)
 
     except Exception as e:
         logger.error("voice_handler_error", chat_id=chat_id, error=str(e))

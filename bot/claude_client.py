@@ -40,6 +40,12 @@ SYSTEM_PROMPT = """Tu es Donna, un assistant personnel intelligent et bienveilla
   Règles du format : ligne vide avant "Todos en cours :", pas de gras/italique, pas d'emoji, un bullet `•` par todo, ajoute `— AAAA-MM-JJ` seulement si deadline présente, "Aucune todo en cours." si la liste est vide.
 - Quand l'utilisateur demande de supprimer quelque chose, crée une pending_action et demande confirmation
 - Formate tes réponses pour Telegram (Markdown simple, pas de fioritures)
+- Mails école : tu peux consulter un cache de 30 mails récents en base (Supabase), synchronisé automatiquement depuis Zimbra par le serveur à 7h/12h/17h. Tu ne déclenches JAMAIS de synchronisation Zimbra toi-même — la base est ta seule source.
+  - `search_emails` : cherche par expéditeur (nom ou email) ou par sujet, avec filtres de date optionnels. Renvoie les métadonnées (pas le corps).
+  - `get_email` : renvoie le mail complet (corps inclus) à partir de son id.
+  - `list_unread_emails` : renvoie les mails reçus dans les X derniers jours (défaut 2).
+  - Pour "affiche le mail complet de X du JJ/MM", utilise d'abord `search_emails` avec `query` et `received_after`/`received_before` pour trouver le bon id, puis `get_email`.
+  - Si un mail demandé n'existe pas dans le cache, dis-le simplement (ex : "Aucun mail trouvé pour X dans le cache des 30 derniers").
 - Aujourd'hui nous sommes le {{current_date}} et le fuseau horaire est {{timezone}}
 """.replace("{max_destructive}", str(MAX_DESTRUCTIVE_ACTIONS_PER_MESSAGE))
 
@@ -243,6 +249,41 @@ TOOLS = [
             "required": ["pending_id", "choice"],
         },
     },
+    {
+        "name": "search_emails",
+        "description": "Cherche dans le cache des mails école (30 derniers, synchronisés depuis Zimbra). Filtre par expéditeur (nom ou email), sujet, et/ou fenêtre de date. Ne renvoie PAS le corps du mail. Utilise ensuite get_email pour le corps complet.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Texte à chercher dans sender_name / sender_email / subject (substring, insensible à la casse)"},
+                "received_after": {"type": "string", "description": "Date ISO (YYYY-MM-DD) ou datetime ISO 8601 : mails reçus à partir de cette date incluse"},
+                "received_before": {"type": "string", "description": "Date ISO (YYYY-MM-DD) ou datetime ISO 8601 : mails reçus jusqu'à cette date incluse"},
+                "limit": {"type": "integer", "description": "Nombre maximum de résultats (1-30)", "default": 10},
+            },
+        },
+    },
+    {
+        "name": "get_email",
+        "description": "Renvoie un mail complet (avec corps) à partir de son id (obtenu via search_emails ou list_unread_emails).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description": "UUID du mail"},
+            },
+            "required": ["email_id"],
+        },
+    },
+    {
+        "name": "list_unread_emails",
+        "description": "Liste les mails en cache reçus dans les X derniers jours (défaut 2), triés du plus récent au plus ancien. Ne renvoie PAS le corps du mail.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Nombre de jours à considérer (1-30)", "default": 2},
+                "limit": {"type": "integer", "description": "Nombre maximum de résultats (1-30)", "default": 10},
+            },
+        },
+    },
 ]
 
 # Mapping tool name -> API endpoint
@@ -264,6 +305,9 @@ TOOL_ENDPOINT_MAP = {
     "create_pending": "/pending/create",
     "list_pending": "/pending/list",
     "resolve_pending": "/pending/resolve",
+    "search_emails": "/emails/search",
+    "get_email": "/emails/get",
+    "list_unread_emails": "/emails/list_unread",
 }
 
 

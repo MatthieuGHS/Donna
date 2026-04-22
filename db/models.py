@@ -164,6 +164,36 @@ class ResolvePendingRequest(BaseModel):
     choice: str = Field(pattern=r"^(confirm|cancel)$")
 
 
+# --- Email request schemas ---
+
+class SyncEmailsRequest(BaseModel):
+    pass
+
+
+class SearchEmailsRequest(BaseModel):
+    query: str | None = Field(default=None, max_length=200)
+    received_after: datetime | None = None
+    received_before: datetime | None = None
+    limit: int = Field(default=10, gt=0, le=30)
+
+
+class GetEmailRequest(BaseModel):
+    email_id: UUID
+
+
+class ListUnreadEmailsRequest(BaseModel):
+    days: int = Field(default=2, gt=0, le=30)
+    limit: int = Field(default=10, gt=0, le=30)
+
+
+class RecapEmailsRequest(BaseModel):
+    pass
+
+
+class MarkNotifiedRequest(BaseModel):
+    email_ids: list[UUID] = Field(default_factory=list, max_length=30)
+
+
 # --- Response schemas ---
 
 class APIResponse(BaseModel):

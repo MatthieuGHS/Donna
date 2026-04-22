@@ -9,7 +9,7 @@ from slowapi.errors import RateLimitExceeded
 
 from api.logging_config import setup_logging
 from api.rate_limit import limiter
-from api.routes import calendar, pending, rules, todos
+from api.routes import calendar, emails, pending, rules, todos
 from config import settings
 
 setup_logging(settings.environment)
@@ -31,6 +31,7 @@ app.include_router(calendar.router, prefix="/calendar", tags=["calendar"])
 app.include_router(todos.router, prefix="/todos", tags=["todos"])
 app.include_router(rules.router, prefix="/rules", tags=["rules"])
 app.include_router(pending.router, prefix="/pending", tags=["pending"])
+app.include_router(emails.router, prefix="/emails", tags=["emails"])
 
 
 @app.exception_handler(Exception)

@@ -24,11 +24,14 @@ class Settings(BaseSettings):
     google_calendar_id: str
     google_service_account_json: str  # JSON string
 
-    # Zimbra (EDT école)
+    # Zimbra (EDT école + IMAP mails)
     zimbra_ics_url: str = ""
     zimbra_user: str = ""
     zimbra_password: str = ""
     zimbra_cache_ttl_seconds: int = 86400
+    zimbra_imap_host: str = ""
+    zimbra_imap_port: int = 993
+    zimbra_emails_cache_size: int = 30
 
     # Supabase
     supabase_url: str

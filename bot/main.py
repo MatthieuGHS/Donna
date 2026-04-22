@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
 
 from api.logging_config import setup_logging
+from bot.api_client import api_client
 from bot.handlers import handle_callback, handle_text, handle_voice
 from bot.recap import send_recap
 from config import settings
@@ -25,6 +26,12 @@ async def post_init(application) -> None:
     async def afternoon_recap() -> None:
         await send_recap(application.bot, "afternoon")
 
+    async def sync_emails_job() -> None:
+        try:
+            await api_client.call("/emails/sync", {})
+        except Exception as e:
+            logger.error("scheduled_email_sync_failed", error=str(e))
+
     scheduler.add_job(
         morning_recap,
         "cron",
@@ -39,12 +46,22 @@ async def post_init(application) -> None:
         minute=0,
         id="afternoon_recap",
     )
+    # Email sync 3x/day — runs slightly before recaps so recap sees fresh data.
+    for hour, job_id in ((7, "emails_sync_morning"), (12, "emails_sync_noon"), (17, "emails_sync_evening")):
+        scheduler.add_job(
+            sync_emails_job,
+            "cron",
+            hour=hour,
+            minute=0,
+            id=job_id,
+        )
 
     scheduler.start()
     logger.info(
         "scheduler_started",
         morning_hour=settings.recap_morning_hour,
         afternoon_hour=settings.recap_afternoon_hour,
+        email_sync_hours=[7, 12, 17],
     )
 
 

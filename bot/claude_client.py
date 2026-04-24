@@ -10,7 +10,7 @@ from config import settings
 
 logger = structlog.get_logger(__name__)
 
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-haiku-4-5"
 
 SYSTEM_PROMPT = """Tu es Donna, un assistant personnel intelligent et bienveillant. Tu parles en français.
 

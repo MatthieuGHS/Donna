@@ -102,8 +102,9 @@ def get_event(event_id: str) -> dict | None:
 def list_overlapping_events(start: datetime, end: datetime) -> list[dict]:
     """List Google Calendar events that overlap with [start, end].
 
-    Used by the pending-action display layer to surface conflicts at
-    confirmation time without leaking event metadata via the freebusy API.
+    Uses `events().list()` instead of freeBusy because the pending-action
+    display layer needs event titles to surface to the user (e.g. "chevauche
+    'Cours maths'"); freeBusy returns only busy ranges, no titles.
     """
     start = ensure_aware(start)
     end = ensure_aware(end)

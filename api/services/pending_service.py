@@ -60,11 +60,19 @@ def _truncate(s: str, limit: int = 80) -> str:
     return s[: limit - 3] + "..."
 
 
-def _build_display_description(p: PendingActionPayload) -> tuple[str, bool]:
+def _build_display_description(
+    p: PendingActionPayload,
+    *,
+    precomputed_conflicts: tuple[list[str], bool] | None = None,
+) -> tuple[str, bool]:
     """Generate (display_description, executable) from a validated payload.
 
     The display string is what the user sees on the inline button. It is
     derived from real data so a compromised model cannot mislabel the action.
+
+    `precomputed_conflicts`: the caller may pass an already-computed
+    (titles, check_failed) tuple from `_detect_conflicts` to avoid a second
+    round trip to Google + Zimbra during the same `create_pending` call.
     """
     a = p.action
 
@@ -101,7 +109,10 @@ def _build_display_description(p: PendingActionPayload) -> tuple[str, bool]:
         return f"Supprimer la règle '{_truncate(rule.get('rule_text') or '(sans texte)')}'", True
 
     if a == PendingActionType.CREATE_EVENT:
-        conflicts, check_failed = _detect_conflicts(p.start, p.end)
+        if precomputed_conflicts is not None:
+            conflicts, check_failed = precomputed_conflicts
+        else:
+            conflicts, check_failed = _detect_conflicts(p.start, p.end)
         when = f"{_format_local_dt(p.start)}–{_format_local_dt(p.end).split(' ')[-1]}"
         title = _truncate(p.title or "(sans titre)")
         base = f"Créer '{title}' le {when}"
@@ -189,7 +200,32 @@ def create_pending(action_payload: dict, description: str) -> dict:
         logger.warning("pending_invalid_payload", errors=e.errors())
         raise ValueError("Payload de pending invalide ou incomplet")
 
-    display_description, executable = _build_display_description(validated)
+    # When a real conflict is detected for create_event, force the validated
+    # payload's `force` to True server-side regardless of what the model sent.
+    # The system prompt instructs Claude to set force=true on conflict, but a
+    # security boundary cannot live in the prompt — Claude has been observed
+    # creating create_event pendings with force=false despite an explicit
+    # conflict in the display_description, which then fails at confirmation
+    # time with "Time slot has conflicts. Use force=true to override."
+    #
+    # Bypassed when `check_failed=True`: if the availability check could not
+    # run, we don't pretend it did — `force` keeps the model-supplied value
+    # and Google's response at confirm time decides.
+    precomputed: tuple[list[str], bool] | None = None
+    if validated.action == PendingActionType.CREATE_EVENT:
+        titles, check_failed = _detect_conflicts(validated.start, validated.end)
+        precomputed = (titles, check_failed)
+        if titles and not check_failed:
+            validated = validated.model_copy(update={"force": True})
+            logger.info(
+                "pending_force_override",
+                action="create_event",
+                conflict_count=len(titles),
+            )
+
+    display_description, executable = _build_display_description(
+        validated, precomputed_conflicts=precomputed
+    )
 
     canonical_payload = validated.model_dump(mode="json", exclude_none=True)
 

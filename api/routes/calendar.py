@@ -115,15 +115,19 @@ async def list_events(
     body: ListEventsRequest,
     _api_key: str = Depends(verify_api_key),
 ) -> APIResponse:
-    logger.info("list_events", date=str(body.target_date))
+    logger.info("list_events", date=str(body.target_date), filtered=bool(body.query))
     try:
         if body.target_date:
-            google_events = calendar_service.list_events(body.target_date, body.target_date)
+            google_events = calendar_service.list_events(
+                body.target_date, body.target_date, query=body.query
+            )
             zimbra_events = []
             zimbra_warn = None
             if zimbra_service.is_configured():
                 try:
-                    zimbra_events = zimbra_service.list_events(body.target_date, body.target_date)
+                    zimbra_events = zimbra_service.list_events(
+                        body.target_date, body.target_date, query=body.query
+                    )
                 except Exception:
                     zimbra_warn = "EDT école indisponible"
             events = _merge_and_sort(google_events, zimbra_events)
@@ -133,12 +137,16 @@ async def list_events(
             return APIResponse(success=True, data=data)
 
         elif body.date_range_start and body.date_range_end:
-            google_events = calendar_service.list_events(body.date_range_start, body.date_range_end)
+            google_events = calendar_service.list_events(
+                body.date_range_start, body.date_range_end, query=body.query
+            )
             zimbra_events = []
             zimbra_warn = None
             if zimbra_service.is_configured():
                 try:
-                    zimbra_events = zimbra_service.list_events(body.date_range_start, body.date_range_end)
+                    zimbra_events = zimbra_service.list_events(
+                        body.date_range_start, body.date_range_end, query=body.query
+                    )
                 except Exception:
                     zimbra_warn = "EDT école indisponible"
             events = _merge_and_sort(google_events, zimbra_events)

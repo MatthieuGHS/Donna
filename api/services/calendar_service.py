@@ -31,8 +31,35 @@ def _get_calendar_service():
     return build("calendar", "v3", credentials=credentials)
 
 
-def list_events(date_start: date, date_end: date) -> list[dict]:
-    """List events between two dates."""
+_DESCRIPTION_MAX_CHARS = 200
+
+
+def _matches_query(event: dict, query: str) -> bool:
+    """Case-insensitive substring match against title + description.
+
+    Run on the FULL description (before any truncation) so a hit beyond
+    the 200-char display cap is not lost.
+    """
+    haystack = ((event.get("title") or "") + " " + (event.get("description") or "")).lower()
+    return query in haystack
+
+
+def _truncate_description(event: dict) -> dict:
+    """Cap description at _DESCRIPTION_MAX_CHARS so a single bloated event
+    doesn't blow up Claude's input tokens. Mutates and returns the same dict
+    for chainability."""
+    desc = event.get("description") or ""
+    if len(desc) > _DESCRIPTION_MAX_CHARS:
+        event["description"] = desc[: _DESCRIPTION_MAX_CHARS - 3] + "..."
+    return event
+
+
+def list_events(date_start: date, date_end: date, query: str | None = None) -> list[dict]:
+    """List events between two dates, optionally filtered by `query`.
+
+    `query` is a case-insensitive substring matched against title + description.
+    Empty / whitespace-only queries are treated as "no filter".
+    """
     service = _get_calendar_service()
     time_min = datetime.combine(date_start, datetime.min.time()).isoformat() + "Z"
     time_max = datetime.combine(date_end, datetime.max.time()).isoformat() + "Z"
@@ -45,9 +72,8 @@ def list_events(date_start: date, date_end: date) -> list[dict]:
         orderBy="startTime",
     ).execute()
 
-    events = result.get("items", [])
-    logger.info("calendar_list_events", count=len(events), date_start=str(date_start), date_end=str(date_end))
-    return [
+    raw_events = result.get("items", [])
+    events = [
         {
             "id": e["id"],
             "title": e.get("summary", "(sans titre)"),
@@ -55,8 +81,24 @@ def list_events(date_start: date, date_end: date) -> list[dict]:
             "end": e["end"].get("dateTime", e["end"].get("date")),
             "description": e.get("description", ""),
         }
-        for e in events
+        for e in raw_events
     ]
+
+    if query and query.strip():
+        q = query.strip().lower()
+        events = [e for e in events if _matches_query(e, q)]
+
+    # Cap descriptions AFTER filtering so query hits beyond char 200 aren't lost.
+    events = [_truncate_description(e) for e in events]
+
+    logger.info(
+        "calendar_list_events",
+        count=len(events),
+        date_start=str(date_start),
+        date_end=str(date_end),
+        filtered=bool(query and query.strip()),
+    )
+    return events
 
 
 def _normalize_dt_field(value) -> str:

@@ -108,8 +108,26 @@ def _get_cached_events() -> list[dict] | None:
     return events
 
 
-def list_events(date_start: date, date_end: date) -> list[dict]:
-    """List Zimbra events between two dates."""
+_DESCRIPTION_MAX_CHARS = 200
+
+
+def _matches_query(event: dict, query: str) -> bool:
+    haystack = ((event.get("title") or "") + " " + (event.get("description") or "")).lower()
+    return query in haystack
+
+
+def _truncate_description(event: dict) -> dict:
+    desc = event.get("description") or ""
+    if len(desc) > _DESCRIPTION_MAX_CHARS:
+        # Mutate a copy: cached events are shared, never mutate them in place.
+        out = dict(event)
+        out["description"] = desc[: _DESCRIPTION_MAX_CHARS - 3] + "..."
+        return out
+    return event
+
+
+def list_events(date_start: date, date_end: date, query: str | None = None) -> list[dict]:
+    """List Zimbra events between two dates, optionally filtered by `query`."""
     all_events = _get_cached_events()
 
     if all_events is None:
@@ -125,6 +143,11 @@ def list_events(date_start: date, date_end: date) -> list[dict]:
         if range_start <= event_start <= range_end:
             filtered.append(event)
 
+    if query and query.strip():
+        q = query.strip().lower()
+        filtered = [e for e in filtered if _matches_query(e, q)]
+
+    filtered = [_truncate_description(e) for e in filtered]
     filtered.sort(key=lambda e: e["start"])
     return filtered
 

@@ -192,6 +192,10 @@ class ListEventsRequest(BaseModel):
     target_date: date | None = None
     date_range_start: date | None = None
     date_range_end: date | None = None
+    # Server-side substring filter on title + description. Reduces Claude's
+    # context dramatically when the user is looking for a specific class of
+    # event (e.g. "ma prochaine heure de conduite").
+    query: str | None = Field(default=None, max_length=200)
 
 
 class CreateEventRequest(BaseModel):

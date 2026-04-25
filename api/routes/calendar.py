@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from api.auth import verify_api_key
 from api.rate_limit import limiter
 from api.services import calendar_service, zimbra_service
+from api.services.calendar_service import EventNotFoundError
 from config import settings
 from db.models import (
     APIResponse,
@@ -190,6 +191,7 @@ async def create_event(
         result = calendar_service.create_event(
             body.title, body.start, body.end, body.description,
             attendees=body.attendees, with_meet=body.with_meet,
+            notify_attendees=body.notify_attendees,
         )
         return APIResponse(success=True, data=result)
     except Exception as e:
@@ -208,6 +210,8 @@ async def update_event(
     try:
         result = calendar_service.update_event(body.event_id, body.fields)
         return APIResponse(success=True, data=result)
+    except EventNotFoundError:
+        return APIResponse(success=False, error="event_not_found")
     except Exception as e:
         logger.error("update_event_error", error=str(e))
         return APIResponse(success=False, error="Failed to update event")
@@ -224,6 +228,8 @@ async def delete_event(
     try:
         result = calendar_service.delete_event(body.event_id)
         return APIResponse(success=True, data=result)
+    except EventNotFoundError:
+        return APIResponse(success=False, error="event_not_found")
     except Exception as e:
         logger.error("delete_event_error", error=str(e))
         return APIResponse(success=False, error="Failed to delete event")

@@ -9,10 +9,13 @@ import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from pydantic import ValidationError
+
 from bot.api_client import api_client
 from bot.claude_client import process_message, process_voice_message
 from bot.security import is_authorized
 from config import settings
+from db.models import PendingActionPayload
 
 logger = structlog.get_logger(__name__)
 
@@ -52,8 +55,11 @@ async def _send_response(
 
     for pending in pending_actions:
         keyboard = _build_pending_keyboard(pending["id"])
+        # Server-generated display_description (Fix 2). Fall back to legacy
+        # description for any pre-migration row still in the wire payload.
+        label = pending.get("display_description") or pending.get("description") or "Action en attente"
         await update.message.reply_text(
-            f"Action en attente : {pending['description']}",
+            f"Action en attente : {label}",
             reply_markup=keyboard,
         )
 
@@ -151,8 +157,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 action_payload = action_data.get("action_payload")
 
                 if action_payload:
-                    action_type = action_payload.get("action")
-                    exec_result = await _execute_pending_action(action_payload)
+                    exec_result = await _execute_pending_action(pending_id, action_payload)
                     if exec_result:
                         await query.edit_message_text(f"Fait. {exec_result}")
                     else:
@@ -170,54 +175,109 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("Erreur lors du traitement.")
 
 
-async def _execute_pending_action(payload: dict) -> str | None:
+async def _mark_pending_obsolete(pending_id: str) -> None:
+    """Best-effort: ask the API to flip executable=false on a pending row.
+
+    Used when execution discovers the underlying object has disappeared since
+    the pending was created. Logged but never raised — the user-facing message
+    is what matters here.
+    """
+    try:
+        await api_client.call("/pending/mark_obsolete", {"pending_id": pending_id})
+    except Exception as e:
+        logger.warning("mark_pending_obsolete_failed", pending_id=pending_id, error=str(e))
+
+
+async def _execute_pending_action(pending_id: str, payload: dict) -> str | None:
     """Execute the action stored in a pending action's payload.
 
-    Handles multiple payload formats since Claude may structure them differently:
-    - {"action": "delete_event", "event_id": "..."}
-    - {"function": "delete_event", "params": {"event_id": "..."}}
-    """
-    # Normalize: support both "action" and "function" keys, and flat/nested params
-    action = payload.get("action") or payload.get("function")
-    params = payload.get("params") or {}
+    Fix 5 — defense in depth:
 
-    def get(key):
-        value = payload.get(key)
-        return value if value is not None else params.get(key)
+    The payload comes back from /pending/resolve already canonical (it was
+    validated and stored by `pending_service.create_pending` in Fix 2). We
+    re-validate here against the same `PendingActionPayload` model so the
+    handler and the server share one shape, and so a corrupted DB row cannot
+    smuggle a different action into the destructive code path.
+
+    `force=True` is no longer auto-injected: it is read from the validated
+    payload (default False). Claude's system prompt instructs setting
+    force=true on create_event pendings created in response to a known
+    conflict; absent that, conflicts surface from Google as normal.
+    """
+    try:
+        validated = PendingActionPayload.model_validate(payload)
+    except ValidationError as e:
+        logger.error("pending_payload_invalid_at_exec", error=str(e), pending_id=pending_id)
+        await _mark_pending_obsolete(pending_id)
+        return "[Pending corrompu : action annulée]"
+
+    action = validated.action.value
 
     try:
         if action == "delete_event":
-            event_id = get("event_id")
-            if event_id:
-                await api_client.call("/calendar/delete_event", {"event_id": event_id})
+            result = await api_client.call(
+                "/calendar/delete_event", {"event_id": validated.event_id}
+            )
+            if result.get("success"):
                 return "Événement supprimé."
+            if result.get("error") == "event_not_found":
+                await _mark_pending_obsolete(pending_id)
+                return "[Pending obsolète : event introuvable]"
+            return f"Impossible de supprimer l'événement : {result.get('error', 'erreur inconnue')}"
 
-        elif action == "delete_todo":
-            todo_id = get("todo_id")
-            if todo_id:
-                await api_client.call("/todos/delete", {"todo_id": todo_id})
+        if action == "delete_todo":
+            result = await api_client.call(
+                "/todos/delete", {"todo_id": str(validated.todo_id)}
+            )
+            if result.get("success"):
                 return await _todo_message("Todo supprimée.")
+            error = result.get("error") or ""
+            if "not found" in error.lower():
+                await _mark_pending_obsolete(pending_id)
+                return "[Pending obsolète : todo introuvable]"
+            return f"Impossible de supprimer la todo : {error or 'erreur inconnue'}"
 
-        elif action == "delete_rule":
-            rule_id = get("rule_id")
-            if rule_id:
-                await api_client.call("/rules/delete", {"rule_id": rule_id})
+        if action == "delete_rule":
+            result = await api_client.call(
+                "/rules/delete", {"rule_id": str(validated.rule_id)}
+            )
+            if result.get("success"):
                 return "Règle supprimée."
+            error = result.get("error") or ""
+            if "not found" in error.lower():
+                await _mark_pending_obsolete(pending_id)
+                return "[Pending obsolète : règle introuvable]"
+            return f"Impossible de supprimer la règle : {error or 'erreur inconnue'}"
 
-        elif action == "create_event":
+        if action == "create_event":
             event_body = {
-                "title": get("title"),
-                "start": get("start"),
-                "end": get("end"),
-                "description": get("description"),
-                "attendees": get("attendees"),
-                "force": True,
+                "title": validated.title,
+                "start": validated.start.isoformat(),
+                "end": validated.end.isoformat(),
+                "description": validated.description,
+                "attendees": validated.attendees,
+                # `force` and `notify_attendees` come from the validated
+                # payload — never auto-injected by the handler.
+                "force": validated.force,
+                "notify_attendees": validated.notify_attendees,
             }
             event_body = {k: v for k, v in event_body.items() if v is not None}
             result = await api_client.call("/calendar/create_event", event_body)
             if result.get("success"):
                 return "Événement créé."
             return f"Impossible de créer l'événement : {result.get('error', 'erreur inconnue')}"
+
+        if action == "update_event":
+            result = await api_client.call(
+                "/calendar/update_event",
+                {"event_id": validated.event_id, "fields": validated.fields},
+            )
+            if result.get("success"):
+                return "Événement modifié."
+            if result.get("error") == "event_not_found":
+                await _mark_pending_obsolete(pending_id)
+                return "[Pending obsolète : event introuvable]"
+            return f"Impossible de modifier l'événement : {result.get('error', 'erreur inconnue')}"
 
     except Exception as e:
         logger.error("execute_pending_failed", action=action, error=str(e))

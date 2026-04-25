@@ -53,3 +53,6 @@ htmlcov/
 
 # Claude Code project context (contains personal info)
 CLAUDE.md
+
+# Sec
+report.md

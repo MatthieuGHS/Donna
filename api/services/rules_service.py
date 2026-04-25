@@ -15,6 +15,22 @@ def _get_client():
     return create_client(settings.supabase_url, settings.supabase_service_role_key)
 
 
+def get_rule(rule_id: UUID) -> dict | None:
+    """Fetch a single rule by ID, or None if not found (or already inactive)."""
+    client = _get_client()
+    result = (
+        client.table("rules")
+        .select("*")
+        .eq("id", str(rule_id))
+        .eq("active", True)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return None
+    return result.data[0]
+
+
 def list_rules(rule_type: str = "all") -> list[dict]:
     """List rules, optionally filtered by type."""
     client = _get_client()

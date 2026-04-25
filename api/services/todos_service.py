@@ -16,6 +16,15 @@ def _get_client():
     return create_client(settings.supabase_url, settings.supabase_service_role_key)
 
 
+def get_todo(todo_id: UUID) -> dict | None:
+    """Fetch a single todo by ID, or None if not found."""
+    client = _get_client()
+    result = client.table("todos").select("*").eq("id", str(todo_id)).limit(1).execute()
+    if not result.data:
+        return None
+    return result.data[0]
+
+
 def list_todos(filter_type: TodoFilter) -> list[dict]:
     """List todos with optional filter."""
     client = _get_client()

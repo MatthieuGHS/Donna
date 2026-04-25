@@ -6,8 +6,17 @@ from datetime import date, datetime
 import structlog
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from config import settings
+
+
+class EventNotFoundError(Exception):
+    """Raised when a Google Calendar event referenced by ID does not exist."""
+
+    def __init__(self, event_id: str) -> None:
+        super().__init__(f"event not found: {event_id}")
+        self.event_id = event_id
 
 logger = structlog.get_logger(__name__)
 
@@ -47,6 +56,56 @@ def list_events(date_start: date, date_end: date) -> list[dict]:
         }
         for e in events
     ]
+
+
+def get_event(event_id: str) -> dict | None:
+    """Fetch a single event by ID. Returns None if it does not exist."""
+    service = _get_calendar_service()
+    try:
+        event = service.events().get(
+            calendarId=settings.google_calendar_id,
+            eventId=event_id,
+        ).execute()
+    except HttpError as e:
+        status = getattr(e, "resp", None) and e.resp.status
+        if status in (404, 410):
+            return None
+        raise
+
+    return {
+        "id": event["id"],
+        "title": event.get("summary", "(sans titre)"),
+        "start": event["start"].get("dateTime", event["start"].get("date")),
+        "end": event["end"].get("dateTime", event["end"].get("date")),
+        "description": event.get("description", ""),
+    }
+
+
+def list_overlapping_events(start: datetime, end: datetime) -> list[dict]:
+    """List Google Calendar events that overlap with [start, end].
+
+    Used by the pending-action display layer to surface conflicts at
+    confirmation time without leaking event metadata via the freebusy API.
+    """
+    import pytz
+
+    tz = pytz.timezone(settings.timezone)
+    events = list_events(start.date(), end.date())
+
+    overlapping: list[dict] = []
+    for e in events:
+        try:
+            e_start = datetime.fromisoformat(e["start"])
+            e_end = datetime.fromisoformat(e["end"])
+        except (ValueError, KeyError):
+            continue
+        if e_start.tzinfo is None:
+            e_start = tz.localize(e_start)
+        if e_end.tzinfo is None:
+            e_end = tz.localize(e_end)
+        if e_start < end and e_end > start:
+            overlapping.append(e)
+    return overlapping
 
 
 def check_availability(start: datetime, end: datetime) -> dict:
@@ -128,8 +187,14 @@ def create_event(
     description: str | None = None,
     attendees: list[str] | None = None,
     with_meet: bool = False,
+    notify_attendees: bool = False,
 ) -> dict:
-    """Create a new calendar event, optionally with attendees."""
+    """Create a new calendar event, optionally with attendees.
+
+    Fix 3: outbound invitation emails are NOT sent unless `notify_attendees=True`
+    is set explicitly. The default closed posture prevents the Google service
+    account from being used as a phishing relay via the user's identity.
+    """
     service = _get_calendar_service()
 
     event_body = {
@@ -142,10 +207,11 @@ def create_event(
     if attendees:
         event_body["attendees"] = [{"email": email} for email in attendees]
 
+    send_updates = "all" if (attendees and notify_attendees) else "none"
     event = service.events().insert(
         calendarId=settings.google_calendar_id,
         body=event_body,
-        sendUpdates="all" if attendees else "none",
+        sendUpdates=send_updates,
     ).execute()
 
     result = {
@@ -163,10 +229,16 @@ def create_event(
 
 
 def update_event(event_id: str, fields: dict) -> dict:
-    """Update an existing calendar event."""
+    """Update an existing calendar event. Raises EventNotFoundError if gone."""
     service = _get_calendar_service()
 
-    event = service.events().get(calendarId=settings.google_calendar_id, eventId=event_id).execute()
+    try:
+        event = service.events().get(calendarId=settings.google_calendar_id, eventId=event_id).execute()
+    except HttpError as e:
+        status = getattr(e, "resp", None) and e.resp.status
+        if status in (404, 410):
+            raise EventNotFoundError(event_id) from e
+        raise
 
     if "title" in fields:
         event["summary"] = fields["title"]
@@ -186,8 +258,14 @@ def update_event(event_id: str, fields: dict) -> dict:
 
 
 def delete_event(event_id: str) -> dict:
-    """Delete a calendar event."""
+    """Delete a calendar event. Raises EventNotFoundError if the event is gone."""
     service = _get_calendar_service()
-    service.events().delete(calendarId=settings.google_calendar_id, eventId=event_id).execute()
+    try:
+        service.events().delete(calendarId=settings.google_calendar_id, eventId=event_id).execute()
+    except HttpError as e:
+        status = getattr(e, "resp", None) and e.resp.status
+        if status in (404, 410):
+            raise EventNotFoundError(event_id) from e
+        raise
     logger.info("calendar_delete_event", event_id=event_id)
     return {"deleted": event_id}

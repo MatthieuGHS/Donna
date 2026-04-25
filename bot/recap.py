@@ -12,8 +12,7 @@ import pytz
 import structlog
 
 from bot.api_client import api_client
-from bot.claude_client import process_message
-from bot.formatting import format_emails_list, format_todos_list
+from bot.formatting import format_emails_list, format_events_list, format_todos_list
 from config import settings
 
 logger = structlog.get_logger(__name__)
@@ -78,6 +77,24 @@ async def _send_to_all_chats(bot, text: str, parse_mode: str | None = None) -> b
     return delivered
 
 
+async def _build_agenda_message(target_date_str: str, header: str) -> str | None:
+    """Fetch events for `target_date_str` and render directly, no Claude.
+
+    Saves a full Claude turn (system + tools + list_events tool result + final
+    response) per recap. The format mirrors the SYSTEM_PROMPT convention
+    (📚 for Zimbra, 🗓️ for Google).
+    """
+    try:
+        result = await api_client.call("/calendar/list_events", {"target_date": target_date_str})
+    except Exception as e:
+        logger.error("recap_agenda_fetch_failed", date=target_date_str, error=str(e))
+        return None
+    if not result.get("success"):
+        return None
+    events = (result.get("data") or {}).get("events") or []
+    return format_events_list(events, header=header)
+
+
 async def send_recap(bot, recap_type: str) -> None:
     """Generate and send a 3-part recap: agenda, todos, emails."""
     tz = pytz.timezone(settings.timezone)
@@ -85,29 +102,15 @@ async def send_recap(bot, recap_type: str) -> None:
 
     if recap_type == "morning":
         target_date = now.strftime("%Y-%m-%d")
-        agenda_prompt = (
-            f"Liste mon agenda (événements du calendrier) pour le {target_date}. "
-            "N'inclus PAS les todos ni les mails — ils sont envoyés séparément. "
-            "Formate simplement et compacte pour Telegram."
-        )
+        agenda_header = "📅 Agenda du jour :"
     else:
-        tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-        agenda_prompt = (
-            f"Liste mon agenda (événements prévus) pour demain ({tomorrow}). "
-            "N'inclus PAS les todos ni les mails — ils sont envoyés séparément. "
-            "Formate simplement et compacte pour Telegram."
-        )
+        target_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        agenda_header = "📅 Agenda demain :"
 
-    # 1. Agenda via Claude
-    try:
-        current_date = now.strftime("%Y-%m-%d %H:%M")
-        agenda_text, _, _ = await process_message(agenda_prompt, current_date)
-    except Exception as e:
-        logger.error("recap_agenda_failed", type=recap_type, error=str(e))
-        agenda_text = None
-
+    # 1. Agenda — direct API call, no Claude (saves ~5500 tokens per recap)
+    agenda_text = await _build_agenda_message(target_date, agenda_header)
     if agenda_text:
-        await _send_to_all_chats(bot, agenda_text, parse_mode="Markdown")
+        await _send_to_all_chats(bot, agenda_text)
         logger.info("recap_agenda_sent", type=recap_type)
 
     # 2. Todos (direct, no Claude)

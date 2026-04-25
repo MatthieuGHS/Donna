@@ -77,6 +77,48 @@ def format_emails_list(emails: list[dict], header: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def format_events_list(events: list[dict], header: str | None = None) -> str:
+    """Render a list of calendar events for direct Telegram delivery.
+
+    Used by the recap so the agenda doesn't need to round-trip through Claude.
+    Format: 'EMOJI HHhMM-HHhMM — Titre' per line, in chronological order.
+    Emoji follows the SYSTEM_PROMPT convention: 📚 for Zimbra (school), 🗓️ for
+    Google (perso). The `events` list is expected sorted by start time, which
+    is what the API returns.
+    """
+    if not events:
+        return header_with_empty(header, "Rien.")
+
+    lines: list[str] = []
+    if header:
+        lines.append(header)
+        lines.append("")
+
+    for ev in events:
+        emoji = "📚" if ev.get("source") == "zimbra" else "🗓️"
+        start = ev.get("start") or ""
+        end = ev.get("end") or ""
+        when = _format_event_range(start, end)
+        title = (ev.get("title") or "(sans titre)").strip() or "(sans titre)"
+        if len(title) > 80:
+            title = title[:77] + "..."
+        lines.append(f"{emoji} {when} — {title}")
+
+    return "\n".join(lines)
+
+
+def _format_event_range(start_iso: str, end_iso: str) -> str:
+    """'HHhMM-HHhMM' if same day, else 'JJ/MM HHhMM-JJ/MM HHhMM'."""
+    try:
+        s = datetime.fromisoformat(start_iso.replace("Z", "+00:00")).astimezone(_local_timezone())
+        e = datetime.fromisoformat(end_iso.replace("Z", "+00:00")).astimezone(_local_timezone())
+    except Exception:
+        return f"{start_iso} — {end_iso}"
+    if s.date() == e.date():
+        return f"{s.strftime('%Hh%M')}-{e.strftime('%Hh%M')}"
+    return f"{s.strftime('%d/%m %Hh%M')}-{e.strftime('%d/%m %Hh%M')}"
+
+
 def format_todos_list(todos: list[dict], header: str | None = None) -> str:
     """Render todos as '• Titre — AAAA-MM-JJ' (deadline only if set)."""
     if not todos:

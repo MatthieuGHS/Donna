@@ -182,10 +182,21 @@ async def create_event(
                     pass
 
             if conflicts:
+                # Stable error code so the bot's tool loop can recognize this
+                # specific failure and steer Claude to create_pending instead
+                # of letting the model improvise a plain-text question.
+                # See bot/claude_client.py for the matching directive.
+                conflicting_titles = [
+                    c.get("title") or c.get("summary") or "(sans titre)"
+                    for c in conflicts
+                ]
                 return APIResponse(
                     success=False,
-                    error="Time slot has conflicts. Use force=true to override.",
-                    data={"conflicts": conflicts},
+                    error="conflict_requires_pending",
+                    data={
+                        "conflicting_titles": conflicting_titles,
+                        "conflicts": conflicts,
+                    },
                 )
 
         result = calendar_service.create_event(

@@ -12,6 +12,7 @@ import pytz
 import structlog
 from icalendar import Calendar
 
+from api.utils.tz import ensure_aware
 from config import settings
 
 logger = structlog.get_logger(__name__)
@@ -135,10 +136,13 @@ def check_availability(start: datetime, end: datetime) -> list[dict]:
     if all_events is None:
         return []
 
+    start = ensure_aware(start)
+    end = ensure_aware(end)
+
     conflicts = []
     for event in all_events:
-        e_start = datetime.fromisoformat(event["start"])
-        e_end = datetime.fromisoformat(event["end"])
+        e_start = ensure_aware(datetime.fromisoformat(event["start"]))
+        e_end = ensure_aware(datetime.fromisoformat(event["end"]))
 
         # Overlap check
         if e_start < end and e_end > start:

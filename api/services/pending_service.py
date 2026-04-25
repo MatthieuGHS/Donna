@@ -101,7 +101,7 @@ def _build_display_description(p: PendingActionPayload) -> tuple[str, bool]:
         return f"Supprimer la règle '{_truncate(rule.get('rule_text') or '(sans texte)')}'", True
 
     if a == PendingActionType.CREATE_EVENT:
-        conflicts = _detect_conflicts(p.start, p.end)
+        conflicts, check_failed = _detect_conflicts(p.start, p.end)
         when = f"{_format_local_dt(p.start)}–{_format_local_dt(p.end).split(' ')[-1]}"
         title = _truncate(p.title or "(sans titre)")
         base = f"Créer '{title}' le {when}"
@@ -112,6 +112,10 @@ def _build_display_description(p: PendingActionPayload) -> tuple[str, bool]:
         if conflicts:
             conflict_str = ", ".join(f"'{_truncate(c, 40)}'" for c in conflicts[:3])
             base = f"{base} ⚠ chevauche : {conflict_str}"
+        elif check_failed:
+            # The availability check is informational UX, not a security gate;
+            # a freeBusy / Zimbra outage must not block pending creation.
+            base = f"{base} ⚠ [chevauchement non vérifié — appel calendrier en échec]"
         return base, True
 
     if a == PendingActionType.UPDATE_EVENT:
@@ -129,14 +133,22 @@ def _build_display_description(p: PendingActionPayload) -> tuple[str, bool]:
     return "Action inconnue", False
 
 
-def _detect_conflicts(start: datetime, end: datetime) -> list[str]:
-    """Return titles of events overlapping [start, end] across Google + Zimbra."""
+def _detect_conflicts(start: datetime, end: datetime) -> tuple[list[str], bool]:
+    """Return (overlap_titles, check_failed) across Google + Zimbra.
+
+    `check_failed` is true if any backend raised — so the caller can surface
+    "[chevauchement non vérifié]" rather than implying a clean check. We never
+    propagate the exception: pending creation must remain available even when
+    Google freeBusy / Zimbra is temporarily down.
+    """
     titles: list[str] = []
+    check_failed = False
     try:
         for ev in calendar_service.list_overlapping_events(start, end):
             titles.append(ev.get("title") or "(sans titre)")
     except Exception as e:
         logger.warning("pending_conflict_check_google_failed", error=str(e))
+        check_failed = True
 
     if zimbra_service.is_configured():
         try:
@@ -144,7 +156,8 @@ def _detect_conflicts(start: datetime, end: datetime) -> list[str]:
                 titles.append(ev.get("title") or "(cours sans titre)")
         except Exception as e:
             logger.warning("pending_conflict_check_zimbra_failed", error=str(e))
-    return titles
+            check_failed = True
+    return titles, check_failed
 
 
 def _summarize_update_fields(fields: dict) -> str:

@@ -8,6 +8,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from api.utils.tz import ensure_aware
 from config import settings
 
 
@@ -58,6 +59,23 @@ def list_events(date_start: date, date_end: date) -> list[dict]:
     ]
 
 
+def _normalize_dt_field(value) -> str:
+    """Coerce a Claude-supplied datetime field to RFC 3339 with explicit offset.
+
+    Accepts a datetime (aware or naive) or an ISO string. Naive values are
+    localized to settings.timezone; aware values are preserved.
+    """
+    if isinstance(value, datetime):
+        return ensure_aware(value).isoformat()
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return value  # let Google reject it explicitly rather than guess
+        return ensure_aware(parsed).isoformat()
+    return value
+
+
 def get_event(event_id: str) -> dict | None:
     """Fetch a single event by ID. Returns None if it does not exist."""
     service = _get_calendar_service()
@@ -87,9 +105,8 @@ def list_overlapping_events(start: datetime, end: datetime) -> list[dict]:
     Used by the pending-action display layer to surface conflicts at
     confirmation time without leaking event metadata via the freebusy API.
     """
-    import pytz
-
-    tz = pytz.timezone(settings.timezone)
+    start = ensure_aware(start)
+    end = ensure_aware(end)
     events = list_events(start.date(), end.date())
 
     overlapping: list[dict] = []
@@ -99,17 +116,21 @@ def list_overlapping_events(start: datetime, end: datetime) -> list[dict]:
             e_end = datetime.fromisoformat(e["end"])
         except (ValueError, KeyError):
             continue
-        if e_start.tzinfo is None:
-            e_start = tz.localize(e_start)
-        if e_end.tzinfo is None:
-            e_end = tz.localize(e_end)
+        e_start = ensure_aware(e_start)
+        e_end = ensure_aware(e_end)
         if e_start < end and e_end > start:
             overlapping.append(e)
     return overlapping
 
 
 def check_availability(start: datetime, end: datetime) -> dict:
-    """Check if a time slot is available."""
+    """Check if a time slot is available against Google Calendar freeBusy.
+
+    `start`/`end` are normalized to a timezone-aware datetime before serializing
+    to RFC 3339; freeBusy rejects offset-less times with HTTP 400.
+    """
+    start = ensure_aware(start)
+    end = ensure_aware(end)
     service = _get_calendar_service()
 
     body = {
@@ -195,6 +216,8 @@ def create_event(
     is set explicitly. The default closed posture prevents the Google service
     account from being used as a phishing relay via the user's identity.
     """
+    start = ensure_aware(start)
+    end = ensure_aware(end)
     service = _get_calendar_service()
 
     event_body = {
@@ -243,9 +266,15 @@ def update_event(event_id: str, fields: dict) -> dict:
     if "title" in fields:
         event["summary"] = fields["title"]
     if "start" in fields:
-        event["start"] = {"dateTime": fields["start"], "timeZone": settings.timezone}
+        event["start"] = {
+            "dateTime": _normalize_dt_field(fields["start"]),
+            "timeZone": settings.timezone,
+        }
     if "end" in fields:
-        event["end"] = {"dateTime": fields["end"], "timeZone": settings.timezone}
+        event["end"] = {
+            "dateTime": _normalize_dt_field(fields["end"]),
+            "timeZone": settings.timezone,
+        }
     if "description" in fields:
         event["description"] = fields["description"]
 

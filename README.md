@@ -11,11 +11,11 @@ Talk to Donna in natural language (text or voice) to manage your calendar, todos
 - **Todos** — create, complete, rename, delete tasks with priorities and deadlines
 - **Rules** — define personal rules and preferences stored in database
 - **Smart scheduling** — find free slots, check availability across all calendar sources
-- **Conflict detection** — creating an event that overlaps with an existing one triggers a Confirmer/Annuler inline button (never an open-ended question from Donna)
-- **Destructive action safety** — all deletions require explicit confirmation via inline buttons
+- **Conflict detection** — creating an event that overlaps with an existing one triggers a Confirmer/Annuler inline button (never an open-ended question from Donna). The conflict is detected server-side at pending creation and `force=true` is overridden by the server when a real overlap exists, regardless of what the model sent
+- **Destructive action safety** — all deletions and any sensitive mutation (event update, event creation with attendees) require explicit confirmation via inline buttons. The text shown on the button is server-generated from the validated payload — the LLM cannot pick what the user sees on Confirm
 - **Daily recaps** — automated morning (7h) and afternoon (13h) recaps, split into three separate messages: agenda, todos, emails
 - **Voice messages** — transcribed via Google Speech-to-Text, then processed as text
-- **Event invites** — create events with attendees who receive email invitations
+- **Event invites** — create events with attendees who receive email invitations only when `notify_attendees=true` is explicitly set on a confirmed pending; never on a direct tool call. Default closed posture prevents the Google service account from being used as a phishing relay
 - **Email cache (Zimbra IMAP)** — rolling window of the 30 most recent unread school emails, synced automatically 3×/day (7h/12h/17h). Donna never triggers a sync herself — she reads from the cache
 - **Token-saving display pattern** — requests to *view* an email, todo list or unread mailbox bypass the LLM entirely: the bot fetches directly from Supabase and sends a separate Telegram message. Claude only sees metadata for identification, never the email body
 
@@ -116,12 +116,18 @@ donna/
 │       ├── todos_service.py      # Supabase CRUD
 │       ├── rules_service.py      # Supabase CRUD
 │       └── pending_service.py    # Pending actions + expiration
+├── api/
+│   └── utils/
+│       └── tz.py            # Shared TZ helper (ensure_aware) — naive datetimes are localized before Google freeBusy
 ├── db/
-│   ├── models.py            # Pydantic schemas
+│   ├── models.py            # Pydantic schemas + PendingActionPayload (discriminated by `action`)
 │   ├── fixtures.py          # Dev seed data (refuses to run in prod)
-│   └── migrations/          # Idempotent SQL scripts (001 → 006)
+│   └── migrations/          # Idempotent SQL scripts (001 → 007)
+├── tests/                   # pytest suite — guards on payload validation, tool-loop cap, attendees, untrusted wrapping, freeBusy, force override
 ├── config.py                # pydantic-settings, loads .env
 ├── requirements.txt
+├── requirements-dev.txt     # pytest + pytest-asyncio
+├── pytest.ini
 ├── .env.example
 ├── Dockerfile
 ├── Procfile
@@ -176,7 +182,7 @@ donna/
 1. Go to [supabase.com](https://supabase.com/dashboard)
 2. Create a new project
 3. Note the **Project URL** and **service_role key** (Settings > API)
-4. Run the migration scripts from `db/migrations/` in the **SQL Editor**, in order (001 through 006)
+4. Run the migration scripts from `db/migrations/` in the **SQL Editor**, in order (001 through 007)
 
 ### Step 5 — Generate internal API key
 
@@ -209,6 +215,13 @@ python -m api.main
 python -m bot.main
 ```
 
+### Step 8 — Run the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## Deploy to Railway
 
 1. Push your code to a **private** GitHub repo
@@ -230,9 +243,13 @@ python -m bot.main
 | API | `X-API-Key` header with constant-time comparison (anti timing attack) |
 | Rate limiting | 100 requests/minute per IP (30 req/min on `/emails/sync`) |
 | Database | Row Level Security on all tables (deny all for anon role) |
+| Pending actions | `action_payload` is validated server-side against a typed enum (`PendingActionPayload`), so the LLM cannot smuggle arbitrary actions. The `display_description` shown on the Confirm button is generated server-side from the validated payload + real Google/Supabase data — Claude's free-text label is stored only for audit, never displayed |
 | Deletions | All destructive actions require confirmation via inline buttons |
-| Event conflicts | Creating an event over an existing one triggers a pending_action (Confirmer/Annuler) — Donna never asks an open-ended question she can't follow up on |
-| Prompt injection | Max 5 destructive actions per message, locked system prompt |
+| Event mutations | `update_event` and `create_event` with attendees are forbidden as direct tool calls — they must round-trip through `create_pending`. Conflicts are detected at pending creation and `force=true` is overridden server-side when a real overlap exists |
+| Outbound mail | Google Calendar invitations are sent only when `notify_attendees=true` is explicitly set on a confirmed pending. Attendees are capped at 5, validated as RFC 5322 (rejects `\n` BCC-smuggling), default `sendUpdates="none"` |
+| Indirect prompt injection | Tool results from `list_unread_emails` and `list_events` (attacker-controllable via mail subjects, calendar invites, Zimbra upstream) are wrapped in `<untrusted_data>` markers; system prompt instructs the model to ignore embedded instructions; inner escape attempts (`</untrusted_data>` in the payload) are sanitized |
+| Tool-use DoS | Claude's tool-use loop is capped at 8 iterations per user message — bounded by code, not by prompt |
+| Prompt injection | Max 5 destructive actions per message, locked system prompt, payload validation as the real boundary |
 | Secrets | All in environment variables, never in code |
 | Zimbra IMAP | IMAPS only (TLS on port 993), password never logged, `BODY.PEEK[]` keeps server-side unread status untouched |
 | Email access | Claude sees metadata only (sender/subject/date) — email bodies never enter LLM context |
@@ -258,9 +275,10 @@ All endpoints require `X-API-Key` header.
 | `POST /rules/list` | List rules |
 | `POST /rules/create` | Create rule |
 | `POST /rules/delete` | Delete rule |
-| `POST /pending/create` | Create pending action |
+| `POST /pending/create` | Create pending action (validates `action_payload` against `PendingActionPayload`, fetches real data to build `display_description`) |
 | `POST /pending/list` | List pending actions |
-| `POST /pending/resolve` | Confirm or cancel pending action |
+| `POST /pending/resolve` | Confirm or cancel pending action (refuses `confirm` on a non-executable / obsolete pending; cancel still allowed) |
+| `POST /pending/mark_obsolete` | Flip `executable=false` on a pending whose underlying object disappeared between creation and execution |
 | `POST /emails/sync` | Pull the most recent UNSEEN mails from Zimbra IMAP into the cache (rolling 30) |
 | `POST /emails/list_unread` | List cached emails from the last N days (metadata only) |
 | `POST /emails/get` | Return a single cached email with its body (used internally by the bot for direct rendering) |
